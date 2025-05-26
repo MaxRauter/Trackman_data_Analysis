@@ -14,13 +14,19 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 import re
+from pathlib import Path
+
+# Default token directory
+TOKEN_DIR = os.path.join(str(Path.home()), "tokens")
 
 def check_saved_tokens():
     """Check for saved tokens and return a dictionary of username -> token"""
-    token_dir = "token"
-    os.makedirs(token_dir, exist_ok=True)
+    if not os.path.exists(TOKEN_DIR):
+        return {}
+    token_dir = TOKEN_DIR
+    os.makedirs(TOKEN_DIR, exist_ok=True)
     
-    token_file = os.path.join(token_dir, "trackman_tokens.json")
+    token_file = os.path.join(TOKEN_DIR, "trackman_tokens.json")
     if os.path.exists(token_file):
         try:
             with open(token_file, 'r') as f:

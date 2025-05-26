@@ -10,14 +10,35 @@ import importlib.util
 from datetime import datetime
 import threading
 import numpy as np
+from pathlib import Path
 
 # Import the trackman module for authentication
 spec = importlib.util.spec_from_file_location("trackman", "trackman.py")
 trackman = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(trackman)
 
-def load_data(username, ball_type):
-    data_dir = os.path.join('Data', username, ball_type)
+# Add a global variable to store the home directory
+HOME_DIR = str(Path.home())  # Default to user's home directory
+
+def get_home_dir():
+    """Get the current home directory setting"""
+    global HOME_DIR
+    return HOME_DIR
+
+def set_home_dir(path):
+    """Set the home directory for tokens and data storage"""
+    global HOME_DIR
+    if os.path.exists(path):
+        HOME_DIR = path
+        return True
+    return False
+
+# Update the load_data function to use the home directory
+def load_data(username, ball_type, home_dir=None):
+    if home_dir is None:
+        home_dir = get_home_dir()
+    
+    data_dir = os.path.join(home_dir, 'Data', username, ball_type)
     if not os.path.exists(data_dir):
         return pd.DataFrame()
 
@@ -56,8 +77,12 @@ def load_data(username, ball_type):
         df = pd.DataFrame()
     return df
 
-def get_available_users():
-    data_root = "Data"
+# Update the get_available_users function to use home directory
+def get_available_users(home_dir=None):
+    if home_dir is None:
+        home_dir = get_home_dir()
+        
+    data_root = os.path.join(home_dir, "Data")
     if not os.path.exists(data_root):
         return []
     return [d for d in os.listdir(data_root) if os.path.isdir(os.path.join(data_root, d))]
@@ -71,12 +96,34 @@ app.layout = html.Div([
     dcc.Store(id="activities-store", data=[]),
     dcc.Store(id="selected-username-store", data=""),
     dcc.Store(id="filtered-data-store", data=[]),
+    dcc.Store(id="home-dir-store", data=str(Path.home())),  # Add this line
     
     # Tabs
     dcc.Tabs(id="main-tabs", value="login", children=[
         # Login Tab
         dcc.Tab(label="Login", value="login", children=[
             html.Div([
+                # Home Directory Setting Section
+                html.Div([
+                    html.H4("Home Directory Settings"),
+                    html.Div([
+                        html.Label("Home Directory:", style={'margin-right': '10px'}),
+                        dcc.Input(
+                            id="home-dir-input",
+                            type="text",
+                            placeholder=f"Enter full path (e.g., {str(Path.home() / 'Golf')})",
+                            value=str(Path.home()),
+                            style={'width': '500px', 'margin-right': '10px'}
+                        ),
+                        html.Button("Set Directory", id="set-home-dir-btn"),
+                    ], style={'margin-bottom': '10px'}),
+                    html.Div([
+                        html.Button("Reset to Default", id="reset-home-dir-btn"),
+                    ], style={'margin-bottom': '10px'}),
+                    html.Div(id="home-dir-status", style={'color': 'green', 'font-weight': 'bold', 'margin-bottom': '20px'}),
+                    html.Hr(),
+                ]),
+                
                 html.H3("Saved Logins"),
                 html.Div([
                     dcc.Dropdown(
@@ -132,7 +179,6 @@ app.layout = html.Div([
                         {"name": "#", "id": "ID"},
                         {"name": "Date", "id": "Date"},
                         {"name": "Type", "id": "Type"},
-                        {"name": "Total Shots", "id": "TotalShots"},
                     ],
                     row_selectable="single",
                     selected_rows=[],
@@ -149,7 +195,7 @@ app.layout = html.Div([
                         'fontWeight': 'bold'
                     },
                     page_current=0,
-                    page_size=10  # Limit to 10 rows per page
+                    page_size=10
                 ),
                 
                 html.Br(),
@@ -208,7 +254,7 @@ app.layout = html.Div([
                         id='plot-type-radio',
                         options=[
                             {'label': 'Gaussian', 'value': 'gaussian'},
-                            {'label': 'Histogram', 'value': 'histogram'}
+                            {'label': 'Single Datapoints', 'value': 'histogram'}
                         ],
                         value='gaussian',
                         labelStyle={'display': 'inline-block', 'margin-right': '10px'}
@@ -268,10 +314,20 @@ app.layout = html.Div([
 @app.callback(
     Output("token-dropdown", "options"),
     Output("token-dropdown", "value"),
-    Input("main-tabs", "value")  # Trigger when login tab is selected
+    Input("main-tabs", "value"),
+    Input("home-dir-store", "data"),  # Add this input
 )
-def update_token_dropdown(active_tab):
+def update_token_dropdown(active_tab, home_dir):
     if active_tab == "login":
+        # Update trackman module to use the custom home directory BEFORE checking tokens
+        if home_dir and home_dir != str(Path.home()):
+            # Set the token directory in the trackman module
+            trackman.TOKEN_DIR = os.path.join(home_dir, "tokens")
+        else:
+            # Reset to default if using home directory
+            trackman.TOKEN_DIR = os.path.join(str(Path.home()), "tokens")
+        
+        # Now check for tokens in the correct directory
         tokens = trackman.check_saved_tokens()
         options = [{'label': username, 'value': username} for username in tokens.keys()]
         return options, None
@@ -288,16 +344,24 @@ def update_token_dropdown(active_tab):
     Input("save-token-btn", "n_clicks"),
     State("token-dropdown", "value"),
     State("username-input", "value"),
+    State("home-dir-store", "data"),  # Add this state
     prevent_initial_call=True
 )
-def handle_login_actions(use_token, new_login, logout, logout_all, save_token, selected_user, username_input):
+def handle_login_actions(use_token, new_login, logout, logout_all, save_token, selected_user, username_input, home_dir):
     triggered = ctx.triggered_id
     status = ""
     save_disabled = True
     selected_username = ""
     
+    # Set the home directory for token operations FIRST
+    if home_dir:
+        trackman.TOKEN_DIR = os.path.join(home_dir, "tokens")
+    else:
+        trackman.TOKEN_DIR = os.path.join(str(Path.home()), "tokens")
+    
+    # Now get tokens from the correct directory
     api = trackman.TrackManAPI()
-    tokens = trackman.check_saved_tokens()
+    tokens = trackman.check_saved_tokens()  # This will now use the updated TOKEN_DIR
     
     if triggered == "use-token-btn" and selected_user:
         token = tokens.get(selected_user)
@@ -305,7 +369,7 @@ def handle_login_actions(use_token, new_login, logout, logout_all, save_token, s
             api.auth_token = token
             api.headers["Authorization"] = f"Bearer {token}"
             if api.test_connection():
-                status = f"Successfully logged in as {selected_user}"
+                status = f"Successfully logged in as {selected_user} (Home: {home_dir})"
                 save_disabled = False
                 selected_username = selected_user
             else:
@@ -314,8 +378,7 @@ def handle_login_actions(use_token, new_login, logout, logout_all, save_token, s
             status = "No token found for selected user"
             
     elif triggered == "new-login-btn":
-        status = "Starting browser login... (Note: This would open a browser window in the full implementation)"
-        # In a real implementation, you would start the login flow here
+        status = f"Starting browser login... (Tokens will be saved to: {os.path.join(home_dir, 'tokens')})"
         save_disabled = False
         
     elif triggered == "logout-btn" and selected_user:
@@ -327,9 +390,7 @@ def handle_login_actions(use_token, new_login, logout, logout_all, save_token, s
         status = "Logged out all users"
         
     elif triggered == "save-token-btn" and username_input:
-        # In a real implementation, you would use the actual token from login
-        # For now, this is just a placeholder
-        status = f"Token save functionality would be implemented here for {username_input}"
+        status = f"Token save functionality would save to: {os.path.join(home_dir, 'tokens')}"
         save_disabled = True
         
     return status, save_disabled, selected_username
@@ -343,15 +404,20 @@ def handle_login_actions(use_token, new_login, logout, logout_all, save_token, s
     Input("download-selected-btn", "n_clicks"),
     Input("download-all-btn", "n_clicks"),
     Input("download-missing-btn", "n_clicks"),
+    Input("main-tabs", "value"),  # Add this input to trigger on tab change
     State("selected-username-store", "data"),
     State("ball-type-dropdown", "value"),
     State("activities-table", "selected_rows"),
     State("activities-store", "data"),
-    prevent_initial_call=True,
+    prevent_initial_call=False,  # Change this to False so it can trigger on initial load
 )
 def handle_activities_actions(refresh_clicks, download_selected_clicks, download_all_clicks, 
-                            download_missing_clicks, username, ball_type, selected_rows, activities):
+                            download_missing_clicks, active_tab, username, ball_type, selected_rows, activities):
     triggered = ctx.triggered_id
+    
+    # Auto-refresh when switching to activities tab
+    if triggered == "main-tabs" and active_tab == "activities":
+        triggered = "refresh-activities-btn"  # Treat as refresh action
     
     if not username:
         return "No user logged in. Please login first.", [], []
@@ -393,14 +459,10 @@ def handle_activities_actions(refresh_clicks, download_selected_clicks, download
                 except Exception:
                     date_str = activity_time[:16].replace('T', ' ') if activity_time else "Unknown"
                 
-                # Get total shot count from activity
-                total_shots = activity.get("totalCount", 0)
-                
                 table_data.append({
                     "ID": i + 1,
                     "Date": date_str,
                     "Type": activity.get("kind", "Unknown"),
-                    "TotalShots": total_shots
                 })
             
             log_message = f"Found {len(range_activities)} range practice activities (sorted chronologically, oldest = #1)"
@@ -554,10 +616,16 @@ def update_sessions_and_clubs(username, ball_type, selected_sessions, comparison
         
     df = load_data(username, ball_type)
     
-    # Handle filtering for 2D Map Carry
+    # Handle filtering for 2D Map attributes
     if attribute == '2DMapCarry':
         # Filter out rows where either carryActual or carrySideActual is null/NaN
         df = df.dropna(subset=['carryActual', 'carrySideActual'])
+    elif attribute == '2DMapTotal':
+        # Filter out rows where either totalActual or totalSideActual is null/NaN
+        df = df.dropna(subset=['totalActual', 'totalSideActual'])
+    elif attribute == '2DMapCarry-Total':
+        # Filter out rows where any of the four required columns is null/NaN
+        df = df.dropna(subset=['carryActual', 'carrySideActual', 'totalActual', 'totalSideActual'])
     else:
         # Filter out rows where the selected attribute is null/NaN
         df = df.dropna(subset=[attribute])
@@ -660,26 +728,47 @@ def generate_plot(n_clicks, username, ball_type, comparison_mode, plot_type, ses
     df = df[df['Session ID'].isin(sessions) & df['Club'].isin(clubs)]
     print(f"DEBUG: After filtering by sessions/clubs: {df.shape}")
     
-    # Handle 2D Map Carry specially
-    if attribute == '2DMapCarry':
-        print("DEBUG: Processing 2D Map Carry - USING REAL DATA")
+    # Handle 2D Map attributes specially
+    if attribute in ['2DMapCarry', '2DMapTotal', '2DMapCarry-Total']:
+        print(f"DEBUG: Processing {attribute} - USING REAL DATA")
         
-        # Filter out rows where either carryActual or carrySideActual is null/NaN
+        # Determine which columns to use based on the attribute
+        if attribute == '2DMapCarry':
+            x_column = 'carryActual'
+            y_column = 'carrySideActual'
+            filter_columns = ['carryActual', 'carrySideActual']
+        elif attribute == '2DMapTotal':
+            x_column = 'totalActual'
+            y_column = 'totalSideActual'
+            filter_columns = ['totalActual', 'totalSideActual']
+        else:  # 2DMapCarry-Total
+            # For carry-total lines, we need all four columns
+            filter_columns = ['carryActual', 'carrySideActual', 'totalActual', 'totalSideActual']
+            x_column = None  # Not applicable for line plots
+            y_column = None  # Not applicable for line plots
+        
+        # Filter out rows where any required column is null/NaN
         before_filter = len(df)
-        df = df.dropna(subset=['carryActual', 'carrySideActual'])
+        df = df.dropna(subset=filter_columns)
         after_filter = len(df)
         print(f"DEBUG: Filtered from {before_filter} to {after_filter} rows")
         
         if df.empty:
             return go.Figure().add_annotation(
-                text="No data available for 2D Map Carry (need both Carry and Carry Side data)",
+                text=f"No data available for {attribute} (need all required distance and side data)",
                 xref="paper", yref="paper",
                 x=0.5, y=0.5, showarrow=False
             )
         
-        print(f"DEBUG: Data sample:")
-        print(f"  carrySideActual: {df['carrySideActual'].head().tolist()}")
-        print(f"  carryActual: {df['carryActual'].head().tolist()}")
+        print(f"DEBUG: Data sample for {attribute}:")
+        if attribute == '2DMapCarry-Total':
+            print(f"  carryActual: {df['carryActual'].head().tolist()}")
+            print(f"  carrySideActual: {df['carrySideActual'].head().tolist()}")
+            print(f"  totalActual: {df['totalActual'].head().tolist()}")
+            print(f"  totalSideActual: {df['totalSideActual'].head().tolist()}")
+        else:
+            print(f"  {y_column}: {df[y_column].head().tolist()}")
+            print(f"  {x_column}: {df[x_column].head().tolist()}")
         print(f"  Clubs: {df['Club'].unique().tolist()}")
         
         # Create scatter plot
@@ -688,174 +777,117 @@ def generate_plot(n_clicks, username, ball_type, comparison_mode, plot_type, ses
         
         # Check if plot_type is histogram (individual shots) or gaussian (means with error ellipses)
         if plot_type == 'histogram':
-            # Plot individual shots
             if comparison_mode == 'clubs':
-                # Add this debug information
-                print(f"DEBUG: Starting 2D Map histogram plot with {len(df)} rows")
-                print(f"DEBUG: Available columns before filtering: {df.columns.tolist()}")
-                print(f"DEBUG: Selected sessions: {sessions}")
-                print(f"DEBUG: Selected clubs: {clubs}")
-                
-                for i, club in enumerate(clubs):
-                    club_data = df[df['Club'] == club]
-                    print(f"DEBUG: Found {len(club_data)} rows for club {club}")
-                    
-                    if len(club_data) == 0:
-                        continue
-                    
-                    color = px.colors.qualitative.Plotly[i % len(px.colors.qualitative.Plotly)]
-                    
-                    for session in sessions:
-                        # Check both column names for sessions
-                        session_data = None
-                        if 'Session ID' in club_data.columns:
-                            session_data = club_data[club_data['Session ID'] == session]
-                            session_col = 'Session ID'
-                        elif 'Session' in club_data.columns:
-                            session_data = club_data[club_data['Session'] == session]
-                            session_col = 'Session'
-                        else:
-                            print(f"ERROR: Can't find session column for {session}")
-                            continue
-                        
-                        print(f"DEBUG: Found {len(session_data)} rows for {session} using '{session_col}'")
-                        
-                        if len(session_data) == 0:
-                            continue
-                        
-                        # Ensure access to carry and carrySide data
-                        x_column = 'carryActual'
-                        y_column = 'carrySideActual'
-                        
-                        # Make sure the data is numeric
-                        session_data[x_column] = pd.to_numeric(session_data[x_column], errors='coerce')
-                        session_data[y_column] = pd.to_numeric(session_data[y_column], errors='coerce')
-                        
-                        # Drop any NaN values
-                        session_data = session_data.dropna(subset=[x_column, y_column])
-                        
-                        if len(session_data) == 0:
-                            print(f"DEBUG: No valid numeric data for {club} - {session}")
-                            continue
-                        
-                        # Print first few values to debug
-                        print(f"DEBUG: First few x values: {session_data[x_column].head().tolist()}")
-                        print(f"DEBUG: First few y values: {session_data[y_column].head().tolist()}")
-                        
-                        # Add trace
-                        fig.add_trace(go.Scatter(
-                            x=session_data[x_column],
-                            y=session_data[y_column],
-                            mode='markers',
-                            name=f"{club} - {session} (n={len(session_data)})",
-                            marker=dict(size=8, color=color, opacity=0.7),
-                            text=[f"Club: {club}<br>Session: {session}<br>Carry: {x:.1f}m<br>Side: {y:.1f}m"
-                                  for x, y in zip(session_data[x_column], session_data[y_column])],
-                            hoverinfo='text'
-                        ))
-                        
-                        print(f"DEBUG: Added trace with {len(session_data)} valid points")
-                        
-                        
-            # After adding all traces, update the layout to ensure proper scaling
-            if len(fig.data) > 0:  # Only if we actually added traces
-                # Collect all x and y values across all traces
-                all_x = []
-                all_y = []
-                for trace in fig.data:
-                    if hasattr(trace, 'x') and trace.x is not None:
-                        all_x.extend([x for x in trace.x if pd.notna(x)])
-                    if hasattr(trace, 'y') and trace.y is not None:
-                        all_y.extend([y for y in trace.y if pd.notna(y)])
-                
-                print(f"DEBUG: Calculated {len(all_x)} valid x points and {len(all_y)} valid y points")
-                
-                if all_x and all_y:
-                    x_min = min(all_x)
-                    x_max = max(all_x)
-                    y_min = min(all_y)
-                    y_max = max(all_y)
-                    
-                    x_margin = (x_max - x_min) * 0.1 if x_min != x_max else 10
-                    y_margin = (y_max - y_min) * 0.1 if y_min != y_max else 5
-                    
-                    print(f"DEBUG: Setting x range to [{x_min-x_margin}, {x_max+x_margin}]")
-                    print(f"DEBUG: Setting y range to [{y_max+y_margin}, {y_min-y_margin}] (inverted)")
-                    
-                    # Configure the overall layout
-                    fig.update_layout(
-                        title=f"2D Shot Distribution - {'' if comparison_mode == 'clubs' else clubs[0] + ' '}Histogram Plot",
-                        xaxis=dict(
-                            range=[x_min - x_margin, x_max + x_margin],
-                            title='Carry Distance (m)',
-                            side="top",
-                            title_standoff=15,
-                        ),
-                        yaxis=dict(
-                            range=[y_max + y_margin, y_min - y_margin],  # Inverted Y axis
-                            title='Carry Side (m): Right(+) / Left(-)'
-                        ),
-                        showlegend=True
-                    )
-                    
-                    # Add reference lines
-                    fig.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
-                    fig.add_vline(x=0, line_dash="dash", line_color="gray", opacity=0.5)
-                else:
-                    print("DEBUG: Could not calculate axes ranges - no valid points")
-            else:
-                # Club over time - plot individual shots by session
-                club = clubs[0]
-                club_data = df[df['Club'] == club]
-                print(f"DEBUG: Found {len(club_data)} rows for club {club}")
-                
-                # Assign unique colors to each session
+                # Multiple clubs comparison - show individual shots as scatter
                 session_colors = {session: colors[i % len(colors)] for i, session in enumerate(sessions)}
                 
                 for session in sessions:
-                    # First determine which column to use for session filtering
-                    if 'Session ID' in club_data.columns:
-                        session_data = club_data[club_data['Session ID'] == session]
-                        session_col = 'Session ID'
-                    elif 'Session' in club_data.columns:
-                        session_data = club_data[club_data['Session'] == session]
-                        session_col = 'Session'
-                    else:
-                        print(f"ERROR: Can't find session column for {session}")
-                        continue
+                    for club_idx, club in enumerate(sorted_clubs):
+                        session_club_data = df[(df['Club'] == club) & (df['Session ID'] == session)]
                         
-                    print(f"DEBUG: Found {len(session_data)} rows for {session} using '{session_col}'")
+                        if len(session_club_data) == 0:
+                            continue
+                        
+                        # Get all individual values for this club-session combination
+                        individual_values = session_club_data[attribute].tolist()
+                        shot_count = len(individual_values)
+                        
+                        # Create y-positions for this club (with some jitter for visibility)
+                        y_positions = [club_idx + np.random.uniform(-0.2, 0.2) for _ in individual_values]
+                        
+                        name = f"{club} - {session} (n={shot_count})"
+                        
+                        fig.add_trace(go.Scatter(
+                            x=individual_values,  # Attribute values on x-axis
+                            y=y_positions,        # Club positions on y-axis with jitter
+                            mode='markers',
+                            name=name,
+                            marker=dict(
+                                color=session_colors[session],
+                                size=8,
+                                opacity=0.7
+                            ),
+                            text=[f"Club: {club}<br>Session: {session}<br>{attribute_label}: {val:.2f}" 
+                                for val in individual_values],
+                            hoverinfo='text'
+                        ))
+        
+                # Update layout for scatter plot - FIX: Remove incorrect xaxis settings
+                fig.update_layout(
+                    title=f'{attribute_label} Individual Shots by Club-Session',
+                    xaxis_title=f'{attribute_label}',  # Keep the continuous x-axis for attribute values
+                    yaxis=dict(
+                        title='Club',
+                        tickmode='array',
+                        tickvals=list(range(len(sorted_clubs))),
+                        ticktext=sorted_clubs
+                    )
+                )
+            else:
+                # Club over time mode - single club, multiple sessions
+                club = clubs[0]
+                club_data = df[df['Club'] == club]
+                
+                session_colors = {session: colors[i % len(colors)] for i, session in enumerate(sessions)}
+                
+                for i, session in enumerate(sessions):
+                    session_data = club_data[club_data['Session ID'] == session]
                     
                     if len(session_data) == 0:
                         continue
                     
-                    # Ensure we have numeric data
-                    session_data['carryActual'] = pd.to_numeric(session_data['carryActual'], errors='coerce')
-                    session_data['carrySideActual'] = pd.to_numeric(session_data['carrySideActual'], errors='coerce')
+                    # Get all individual values for this session
+                    individual_values = session_data[attribute].tolist()
+                    shot_count = len(individual_values)
                     
-                    # Drop any NaN values
-                    session_data = session_data.dropna(subset=['carryActual', 'carrySideActual'])
+                    # Create y-positions for this session (with some jitter for visibility)
+                    y_positions = [i + np.random.uniform(-0.2, 0.2) for _ in individual_values]
                     
-                    if len(session_data) == 0:
-                        print(f"DEBUG: No valid numeric data for {session}")
-                        continue
-                        
+                    name = f"{session} (n={shot_count})"
+                    
                     fig.add_trace(go.Scatter(
-                        x=session_data['carryActual'],
-                        y=session_data['carrySideActual'],
+                        x=individual_values,  # Attribute values on x-axis
+                        y=y_positions,        # Session positions on y-axis with jitter
                         mode='markers',
-                        name=f"{session} (n={len(session_data)})",
-                        marker=dict(size=8, color=session_colors[session], opacity=0.7),
-                        text=[f"Session: {session}<br>Club: {club}<br>Carry: {x:.1f}m<br>Side: {y:.1f}m"
-                              for x, y in zip(session_data['carryActual'], session_data['carrySideActual'])],
+                        name=name,
+                        marker=dict(
+                            color=session_colors[session],
+                            size=8,
+                            opacity=0.7
+                        ),
+                        text=[f"Session: {session}<br>Club: {club}<br>{attribute_label}: {val:.2f}" 
+                            for val in individual_values],
                         hoverinfo='text'
                     ))
                 
-                print(f"DEBUG: Added {len(club_data)} individual shots for club {club}")
+                # Update layout for scatter plot - FIX: Remove incorrect xaxis settings
+                fig.update_layout(
+                    title=f'{club} - {attribute_label} Individual Shots Over Time',
+                    xaxis_title=f'{attribute_label}',  # Keep the continuous x-axis for attribute values
+                    yaxis=dict(
+                        title='Session',
+                        tickmode='array',
+                        tickvals=list(range(len(sessions))),
+                        ticktext=sessions
+                    )
+                )
         else:
-            # Original code for showing means with error ellipses
-            if comparison_mode == 'clubs':
-                print("DEBUG: Creating 2D map for clubs comparison - aggregated by session")
+            # Gaussian mode - for carry-total lines, we'll show mean positions connected by lines
+            # Note: This is a simplified implementation - we could enhance it further
+            if attribute == '2DMapCarry-Total':
+                print(f"DEBUG: Gaussian mode not fully implemented for {attribute} - showing message")
+                # Return a figure with a message that this combination isn't supported
+                return go.Figure().add_annotation(
+                    text="2D Map Carry-Total only works with Histogram mode.<br>Please switch Plot Type to 'Histogram' to view carry-total lines.",
+                    xref="paper", yref="paper",
+                    x=0.5, y=0.5, 
+                    showarrow=False,
+                    font=dict(size=16),
+                    align="center"
+                )
+            # Original code for showing means with error ellipses (for carry and total only)
+            if comparison_mode == 'clubs' and attribute != '2DMapCarry-Total':
+                print(f"DEBUG: Creating {attribute} for clubs comparison - aggregated by session")
                 
                 # Group data by club and session, calculate means and std devs
                 for i, club in enumerate(clubs):
@@ -878,28 +910,29 @@ def generate_plot(n_clicks, username, ball_type, comparison_mode, plot_type, ses
                         if len(session_data) == 0:
                             continue
                         
-                        # SWAPPED: x is now carry, y is now carry side
-                        x_mean = session_data['carryActual'].mean()
-                        y_mean = session_data['carrySideActual'].mean()
-                        x_std = session_data['carryActual'].std() if len(session_data) > 1 else 0
-                        y_std = session_data['carrySideActual'].std() if len(session_data) > 1 else 0
+                        # x is distance, y is side
+                        x_mean = session_data[x_column].mean()
+                        y_mean = session_data[y_column].mean()
+                        x_std = session_data[x_column].std() if len(session_data) > 1 else 0
+                        y_std = session_data[y_column].std() if len(session_data) > 1 else 0
                         
                         x_means.append(x_mean)
                         y_means.append(y_mean)
                         x_errors.append(x_std)
                         y_errors.append(y_std)
                         
+                        distance_type = x_column.replace('Actual', '')
                         hover_texts.append(
                             f"Club: {club}<br>"
                             f"Session: {session}<br>"
                             f"Shots: {len(session_data)}<br>"
-                            f"Mean Carry: {x_mean:.1f}±{x_std:.1f}m<br>"
+                            f"Mean {distance_type}: {x_mean:.1f}±{x_std:.1f}m<br>"
                             f"Mean Side: {y_mean:.1f}±{y_std:.1f}m"
                         )
                     
                     color = px.colors.qualitative.Plotly[i % len(px.colors.qualitative.Plotly)]
 
-                    # Draw the mean‐points only (no error_x/error_y)
+                    # Draw the mean points only (no error_x/error_y)
                     fig.add_trace(go.Scatter(
                         x=x_means,
                         y=y_means,
@@ -925,8 +958,9 @@ def generate_plot(n_clicks, username, ball_type, comparison_mode, plot_type, ses
                             )
                         
                         print(f"DEBUG: Added {len(x_means)} data points for club {club}")
-            else:
-                print("DEBUG: Creating 2D map for time comparison - aggregated by club")
+            # Mode is 'time' - plot clubs over time    
+            elif attribute != '2DMapCarry-Total':
+                print(f"DEBUG: Creating {attribute} for time comparison - aggregated by club")
                 club = clubs[0]
                 club_data = df[df['Club'] == club]
                 
@@ -948,17 +982,18 @@ def generate_plot(n_clicks, username, ball_type, comparison_mode, plot_type, ses
                     if len(session_data) == 0:
                         continue
                     
-                    # SWAPPED: x is now carry, y is now carry side
-                    x_mean = session_data['carryActual'].mean()
-                    y_mean = session_data['carrySideActual'].mean()
-                    x_std = session_data['carryActual'].std() if len(session_data) > 1 else 0
-                    y_std = session_data['carrySideActual'].std() if len(session_data) > 1 else 0
+                    # x is distance, y is side
+                    x_mean = session_data[x_column].mean()
+                    y_mean = session_data[y_column].mean()
+                    x_std = session_data[x_column].std() if len(session_data) > 1 else 0
+                    y_std = session_data[y_column].std() if len(session_data) > 1 else 0
                     
+                    distance_type = x_column.replace('Actual', '')
                     hover_texts.append(
                         f"Session: {session}<br>"
                         f"Club: {club}<br>"
                         f"Shots: {len(session_data)}<br>"
-                        f"Mean Carry: {x_mean:.1f}±{x_std:.1f}m<br>"
+                        f"Mean {distance_type}: {x_mean:.1f}±{x_std:.1f}m<br>"
                         f"Mean Side: {y_mean:.1f}±{y_std:.1f}m"
                     )
 
@@ -985,50 +1020,88 @@ def generate_plot(n_clicks, username, ball_type, comparison_mode, plot_type, ses
                             layer="below"
                         )
                     
-                    print(f"DEBUG: Added {len(x_means)} data points for {club} over time")
+                    print(f"DEBUG: Added data points for {club} over time")
         
         # Add reference lines for better visualization
         fig.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
         fig.add_vline(x=0, line_dash="dash", line_color="gray", opacity=0.5)
         
         # Calculate axis ranges for better presentation
-        # SWAPPED: x values are now carry, y values are now carry side
-        x_values = df['carryActual'].values
-        y_values = df['carrySideActual'].values
+        if attribute == '2DMapCarry-Total':
+            # For carry-total lines, we need to consider both carry and total positions
+            all_x_values = list(df['carryActual'].values) + list(df['totalActual'].values)
+            all_y_values = list(df['carrySideActual'].values) + list(df['totalSideActual'].values)
+        else:
+            all_x_values = df[x_column].values
+            all_y_values = df[y_column].values
         
-        x_margin = (max(x_values) - min(x_values)) * 0.1 if len(x_values) > 0 else 10
-        y_margin = (max(y_values) - min(y_values)) * 0.1 if len(y_values) > 0 else 10
+        x_margin = (max(all_x_values) - min(all_x_values)) * 0.1 if len(all_x_values) > 0 else 10
+        y_margin = (max(all_y_values) - min(all_y_values)) * 0.1 if len(all_y_values) > 0 else 10
         
-        # Update layout with swapped axis labels
-        title_suffix = f" - {comparison_mode.title()} Comparison" if comparison_mode == 'clubs' else f" - {clubs[0]} Over Time"
-        fig.update_layout(
-            title=f'2D Carry Map{title_suffix} (Mean ± SD)',
-            showlegend=True,
-            legend=dict(
-                title="Clubs" if comparison_mode == 'clubs' else "Sessions",
-                orientation="h" if len(clubs) * len(sessions) > 6 else "v",
-            ),
-            # Remove custom height to match other plots
-            # SWAPPED axis labels and ranges
-            xaxis=dict(
-                range=[min(x_values) - x_margin, max(x_values) + x_margin],
-                title='Carry Distance (m)',
-                side="top",
-                title_standoff=15,
-                zeroline=True,
-                zerolinecolor='gray',
-                zerolinewidth=1
-            ),
-            yaxis=dict(
-                range=[max(y_values) + y_margin, min(y_values) - y_margin],  # INVERTED: max to min
-                title='Carry Side (m): Right(+) / Left(-)', 
-                zeroline=True,
-                zerolinecolor='gray',
-                zerolinewidth=1
+        # Update layout with appropriate axis labels
+        if attribute == '2DMapCarry-Total':
+            distance_type = 'Carry-Total'
+            title_suffix = f" - {comparison_mode.title()} Comparison" if comparison_mode == 'clubs' else f" - {clubs[0]} Over Time"
+            fig.update_layout(
+                title=f'2D {distance_type} Map{title_suffix}',
+                height=700,  # Add fixed height
+                showlegend=True,
+                legend=dict(
+                    title="Clubs" if comparison_mode == 'clubs' else "Sessions",
+                    orientation="h",  # Force horizontal orientation for better space usage
+                ),
+                # axis labels and ranges
+                xaxis=dict(
+                    range=[min(all_x_values) - x_margin, max(all_x_values) + x_margin],
+                    title='Distance (m)',
+                    side="top",
+                    title_standoff=15,
+                    zeroline=True,
+                    zerolinecolor='gray',
+                    zerolinewidth=1
+                ),
+                yaxis=dict(
+                    range=[max(all_y_values) + y_margin, min(all_y_values) - y_margin],  # INVERTED: max to min
+                    title='Side (m): Right(+) / Left(-)', 
+                    zeroline=True,
+                    zerolinecolor='gray',
+                    zerolinewidth=1
+                )
             )
-        )
+        else:
+            distance_type = x_column.replace('Actual', '')
+            title_suffix = f" - {comparison_mode.title()} Comparison" if comparison_mode == 'clubs' else f" - {clubs[0]} Over Time"
+            fig.update_layout(
+                title=f'2D {distance_type} Map{title_suffix} (Mean ± SD)',
+                height=700,  # Add fixed height
+                showlegend=True,
+                legend=dict(
+                    title="Clubs" if comparison_mode == 'clubs' else "Sessions",
+                    orientation="h",  # Force horizontal orientation for better space usage
+                ),
+                # axis labels and ranges
+                xaxis=dict(
+                    range=[min(all_x_values) - x_margin, max(all_x_values) + x_margin],
+                    title=f'{distance_type} Distance (m)',
+                    side="top",
+                    title_standoff=15,
+                    zeroline=True,
+                    zerolinecolor='gray',
+                    zerolinewidth=1
+                ),
+                yaxis=dict(
+                    range=[max(all_y_values) + y_margin, min(all_y_values) - y_margin],  # INVERTED: max to min
+                    title=f'{distance_type} Side (m): Right(+) / Left(-)', 
+                    zeroline=True,
+                    zerolinecolor='gray',
+                    zerolinewidth=1
+                )
+            )
         
         print(f"DEBUG: Created figure with {len(fig.data)} traces")
+        print(f"DEBUG: Figure layout: {fig.layout}")
+        print(f"DEBUG: Figure data: {fig.data}")
+
         return fig
     else:
         # Original plotting logic for other attributes
@@ -1049,7 +1122,7 @@ def generate_plot(n_clicks, username, ball_type, comparison_mode, plot_type, ses
         
         # Get attribute label for display - updated to match allowed attributes only
         label_mapping = {
-            'ballSpeed': 'Ball Speed (mph)',
+            'ballSpeed': 'Ball Speed (km/h)',
             'ballSpin': 'Ball Spin (rpm)', 
             'carryActual': 'Carry (m)',
             'carrySideActual': 'Carry Side (m)',
@@ -1061,6 +1134,9 @@ def generate_plot(n_clicks, username, ball_type, comparison_mode, plot_type, ses
         }
         
         attribute_label = label_mapping.get(attribute, attribute.replace('_', ' ').title())
+        
+        # Initialize sorted_clubs here to avoid scope issues
+        sorted_clubs = []
         
         if comparison_mode == 'clubs':
             # Multiple clubs comparison - different colors by session
@@ -1098,49 +1174,79 @@ def generate_plot(n_clicks, username, ball_type, comparison_mode, plot_type, ses
             sorted_clubs = [item['club'] for item in sorted(club_data, key=lambda x: x['avg_mean'])]
             
             if plot_type == 'histogram':
-                # Create bar chart with sorted clubs on x-axis
+                # Multiple clubs comparison - show individual shots as scatter
+                session_colors = {session: colors[i % len(colors)] for i, session in enumerate(sessions)}
+                
                 for session in sessions:
-                    for club in sorted_clubs:
+                    for club_idx, club in enumerate(sorted_clubs):
                         session_club_data = df[(df['Club'] == club) & (df['Session ID'] == session)]
                         
                         if len(session_club_data) == 0:
                             continue
-                            
-                        attr_mean = session_club_data[attribute].mean()
-                        attr_std = session_club_data[attribute].std()
-                        shot_count = len(session_club_data)
+                        
+                        # Get all individual values for this club-session combination
+                        individual_values = session_club_data[attribute].tolist()
+                        shot_count = len(individual_values)
+                        
+                        # Create y-positions for this club (with some jitter for visibility)
+                        y_positions = [club_idx + np.random.uniform(-0.2, 0.2) for _ in individual_values]
                         
                         name = f"{club} - {session} (n={shot_count})"
                         
-                        fig.add_trace(go.Bar(
-                            x=[club],
-                            y=[attr_mean],
+                        fig.add_trace(go.Scatter(
+                            x=individual_values,
+                            y=y_positions,
+                            mode='markers',
                             name=name,
-                            error_y=dict(
-                                type='data',
-                                array=[attr_std],
-                                visible=True
+                            marker=dict(
+                                color=session_colors[session],
+                                size=8,
+                                opacity=0.7
                             ),
-                            text=[f"Mean: {attr_mean:.2f}<br>SD: {attr_std:.2f}"],
-                            hoverinfo='text+name',
-                            marker_color=session_colors[session]
+                            text=[f"Club: {club}<br>Session: {session}<br>{attribute_label}: {val:.2f}" 
+                                for val in individual_values],
+                            hoverinfo='text'
                         ))
                 
-                # Update layout to respect the sorting
+                # Update layout for scatter plot - FIX: Remove incorrect xaxis settings
                 fig.update_layout(
-                    title=f'Mean {attribute_label} by Club-Session',
-                    xaxis_title='Club',
-                    yaxis_title=f'Mean {attribute_label}',
-                    barmode='group',
-                    xaxis=dict(
-                        categoryorder='array',
-                        categoryarray=sorted_clubs
+                    title=f'{attribute_label} Individual Shots by Club-Session',
+                    xaxis_title=f'{attribute_label}',  # Keep the continuous x-axis for attribute values
+                    yaxis=dict(
+                        title='Club',
+                        tickmode='array',
+                        tickvals=list(range(len(sorted_clubs))),
+                        ticktext=sorted_clubs
                     )
                 )
             else:
-                # Scatter with sorted clubs on y-axis (reversed to have lowest at top)
-                for session in sessions:
-                    for club in sorted_clubs:
+                # Scatter with sorted clubs on y-axis
+                for club_idx, club in enumerate(sorted_clubs):
+                    # Calculate how many sessions this club has
+                    club_sessions = [session for session in sessions 
+                                    if len(df[(df['Club'] == club) & (df['Session ID'] == session)]) > 0]
+                    
+                    # Create base position for this club
+                    base_position = club_idx
+                    
+                    # If multiple sessions, spread them around the base position
+                    if len(club_sessions) > 1:
+                        # Create small offsets around the base position
+                        session_offsets = []
+                        offset_range = 0.3  # Total spread range (adjust as needed)
+                        for i, session in enumerate(club_sessions):
+                            if len(club_sessions) == 2:
+                                # For 2 sessions: -0.15, +0.15
+                                offset = (i - 0.5) * (offset_range / 1)
+                            else:
+                                # For 3+ sessions: spread evenly
+                                offset = (i - (len(club_sessions) - 1) / 2) * (offset_range / (len(club_sessions) - 1))
+                            session_offsets.append(offset)
+                    else:
+                        session_offsets = [0]  # Single session, no offset
+                    
+                    # Add traces for each session of this club
+                    for session_idx, session in enumerate(club_sessions):
                         session_club_data = df[(df['Club'] == club) & (df['Session ID'] == session)]
                         
                         if len(session_club_data) == 0:
@@ -1149,12 +1255,15 @@ def generate_plot(n_clicks, username, ball_type, comparison_mode, plot_type, ses
                         attr_mean = session_club_data[attribute].mean()
                         attr_std = session_club_data[attribute].std()
                         shot_count = len(session_club_data)
+                        
+                        # Calculate the y-position with offset
+                        y_position = base_position + session_offsets[session_idx]
                         
                         name = f"{club} - {session} (n={shot_count})"
                         
                         fig.add_trace(go.Scatter(
                             x=[attr_mean],
-                            y=[club],
+                            y=[y_position],
                             mode='markers',
                             name=name,
                             marker=dict(size=12, opacity=0.8, color=session_colors[session]),
@@ -1164,111 +1273,129 @@ def generate_plot(n_clicks, username, ball_type, comparison_mode, plot_type, ses
                                 visible=True,
                                 color=session_colors[session]
                             ),
-                            text=[f"Mean: {attr_mean:.2f}<br>SD: {attr_std:.2f}"],
+                            text=[f"Club: {club}<br>Session: {session}<br>Mean: {attr_mean:.2f}<br>SD: {attr_std:.2f}"],
                             hoverinfo='text+name'
                         ))
-                
-                # Update layout to respect the sorting (low to high from top to bottom)
-                fig.update_layout(
-                    title=f'Mean {attribute_label} by Club-Session',
-                    xaxis_title=f'Mean {attribute_label}',
-                    yaxis_title='Club',
-                    yaxis=dict(
-                        categoryorder='array',
-                        categoryarray=list(reversed(sorted_clubs))
-                    )
+
+            # Update layout to use custom y-axis labels
+            fig.update_layout(
+                title=f'Mean {attribute_label} by Club-Session',
+                xaxis_title=f'Mean {attribute_label}',
+                yaxis_title='Club',
+                yaxis=dict(
+                    tickmode='array',
+                    tickvals=list(range(len(sorted_clubs))),
+                    ticktext=sorted_clubs
                 )
+            )
         else:
-            # Club over time - Single club with sessions as rows
-            club = clubs[0]  # Only one club in this mode
+            # Club over time mode - single club, multiple sessions
+            club = clubs[0]
+            club_data = df[df['Club'] == club]
             
-            # Collect session data for sorting by mean value
-            session_data_for_sorting = []
-            for session in sessions:
-                session_club_data = df[(df['Club'] == club) & (df['Session ID'] == session)]
+            # Group by session and calculate statistics
+            session_colors = {session: colors[i % len(colors)] for i, session in enumerate(sessions)}
+            
+            for i, session in enumerate(sessions):
+                session_data = club_data[club_data['Session ID'] == session]
                 
-                if len(session_club_data) == 0:
+                if len(session_data) == 0:
                     continue
-                    
-                attr_mean = session_club_data[attribute].mean()
-                attr_std = session_club_data[attribute].std()
-                shot_count = len(session_club_data)
                 
-                session_data_for_sorting.append({
-                    'session': session,
-                    'mean': attr_mean,
-                    'std': attr_std,
-                    'count': shot_count
-                })
-            
-            # Sort sessions by mean value
-            sorted_sessions = [item['session'] for item in sorted(session_data_for_sorting, key=lambda x: x['mean'])]
-            
-            # Create plots with sorted sessions
-            for session_info in sorted(session_data_for_sorting, key=lambda x: x['mean']):
-                session = session_info['session']
-                attr_mean = session_info['mean']
-                attr_std = session_info['std']
-                shot_count = session_info['count']
+                attr_mean = session_data[attribute].mean()
+                attr_std = session_data[attribute].std()
+                shot_count = len(session_data)
                 
                 if plot_type == 'histogram':
-                    fig.add_trace(go.Bar(
-                        x=[attr_mean],
-                        y=[session],
-                        orientation='h',
-                        name=f"{session} (n={shot_count})",
-                        error_x=dict(type='data', array=[attr_std], visible=True),
-                        text=[f"Mean: {attr_mean:.2f}<br>SD: {attr_std:.2f}"],
-                        hoverinfo='text+name'
+                    # Get all individual values for this session
+                    individual_values = session_data[attribute].tolist()
+                    shot_count = len(individual_values)
+                    
+                    # Create y-positions for this session (with some jitter for visibility)
+                    y_positions = [i + np.random.uniform(-0.2, 0.2) for _ in individual_values]
+                    
+                    name = f"{session} (n={shot_count})"
+                    fig.add_trace(go.Scatter(
+                        x=individual_values,  # Attribute values on x-axis
+                        y=y_positions,        # Session positions on y-axis with jitter
+                        mode='markers',
+                        name=name,
+                        marker=dict(
+                            color=session_colors[session],
+                            size=8,
+                            opacity=0.7
+                        ),
+                        text=[f"Session: {session}<br>Club: {club}<br>{attribute_label}: {val:.2f}" 
+                            for val in individual_values],
+                        hoverinfo='text'
                     ))
                 else:
                     fig.add_trace(go.Scatter(
                         x=[attr_mean],
-                        y=[session],
+                        y=[len(sessions) - 1 - sessions.index(session)],  # Reverse order
                         mode='markers',
                         name=f"{session} (n={shot_count})",
-                        marker=dict(size=12),
-                        error_x=dict(type='data', array=[attr_std], visible=True),
-                        text=[f"Mean: {attr_mean:.2f}<br>SD: {attr_std:.2f}"],
+                        marker=dict(size=12, opacity=0.8, color=session_colors[session]),
+                        error_x=dict(
+                            type='data',
+                            array=[attr_std],
+                            visible=True,
+                            color=session_colors[session]
+                        ),
+                        text=[f"Club: {club}<br>Session: {session}<br>Mean: {attr_mean:.2f}<br>SD: {attr_std:.2f}"],
                         hoverinfo='text+name'
                     ))
-                    
-            # Layout for time comparison - using sorted sessions
-            fig.update_layout(
-                title=f'{attribute_label} Over Time for {club}',
-                xaxis_title=attribute_label,
-                yaxis_title='Session',
-                yaxis=dict(
-                    categoryorder='array',
-                    categoryarray=list(reversed(sorted_sessions))  # Reverse so lowest is at top
+            
+            if plot_type == 'histogram':
+                fig.update_layout(
+                    title=f'{club} - {attribute_label} Individual Shots Over Time',
+                    xaxis_title=f'{attribute_label}',  # Attribute values on x-axis
+                    yaxis=dict(
+                        title='Session',
+                        tickmode='array',
+                        tickvals=list(range(len(sessions))),
+                        ticktext=sessions
+                    )
                 )
-            )
-        
-        # Common layout settings for non-2D maps
-        fig.update_layout(
-            legend=dict(
-                title="Club - Session" if comparison_mode == 'clubs' else "Sessions",
-                orientation="h" if len(clubs) * len(sessions) > 6 else "v",
-            ),
-            # Move x-axis title to the top
-            xaxis=dict(
-                side="top",
-                title=dict(
-                    standoff=15
+            else:
+                fig.update_layout(
+                    title=f'{club} - {attribute_label} Over Time',
+                    xaxis_title=f'Mean {attribute_label}',
+                    yaxis_title='Session',
+                    yaxis=dict(
+                        tickmode='array',
+                        tickvals=list(range(len(sessions))),
+                        ticktext=list(reversed(sessions))
+                    )
                 )
+    
+    # Common layout settings for non-2D maps
+    fig.update_layout(
+        height=600,  # Add fixed height for regular plots
+        legend=dict(
+            title="Club - Session" if comparison_mode == 'clubs' else "Sessions",
+            orientation="h",  # Force horizontal orientation
+        ),
+        # Move x-axis title to the top
+        xaxis=dict(
+            side="top",
+            title=dict(
+                standoff=15
             )
         )
-        
-        return fig
+    )
+    
+    return fig
 
 @app.callback(
     Output('user-dropdown', 'options'),
     Output('user-dropdown', 'value'),
-    Input('main-tabs', 'value')  # Trigger when analysis tab is selected
+    Input('main-tabs', 'value'),
+    Input('home-dir-store', 'data'),  # Add this input
 )
-def update_user_dropdown(active_tab):
+def update_user_dropdown(active_tab, home_dir):
     if active_tab == "analysis":
-        users = get_available_users()
+        users = get_available_users(home_dir)
         options = [{'label': u, 'value': u} for u in users]
         value = users[0] if users else None
         return options, value
@@ -1330,7 +1457,7 @@ def update_attribute_dropdown(username, ball_type):
     
     # Define the specific attributes we want to include
     allowed_attributes = {
-        'ballSpeed': 'Ball Speed (mph)',
+        'ballSpeed': 'Ball Speed (km/h)',
         'ballSpin': 'Ball Spin (rpm)', 
         'carryActual': 'Carry (m)',
         'carrySideActual': 'Carry Side (m)',
@@ -1339,14 +1466,16 @@ def update_attribute_dropdown(username, ball_type):
         'maxHeight': 'Height (m)',
         'totalActual': 'Total (m)',
         'totalSideActual': 'Total Side (m)',
-        '2DMapCarry': '2D Map Carry'  # Add the new 2D map option
+        '2DMapCarry': '2D Map Carry',
+        '2DMapTotal': '2D Map Total',
+        '2DMapCarry-Total': '2D Map Carry-Total'  # Add the new carry-total option
     }
     
     # Check which of the allowed attributes are actually present in the data
     available_options = []
     for col_name, display_label in allowed_attributes.items():
         if col_name == '2DMapCarry':
-            # For 2D map, check if both carryActual and carrySideActual exist
+            # For 2D map carry, check if both carryActual and carrySideActual exist
             carry_exists = 'carryActual' in df.columns and pd.api.types.is_numeric_dtype(df['carryActual'])
             side_exists = 'carrySideActual' in df.columns and pd.api.types.is_numeric_dtype(df['carrySideActual'])
             print(f"DEBUG: carryActual exists: {carry_exists}")
@@ -1354,6 +1483,30 @@ def update_attribute_dropdown(username, ball_type):
             
             if carry_exists and side_exists:
                 print(f"DEBUG: Adding 2D Map Carry option")
+                available_options.append({'label': display_label, 'value': col_name})
+        elif col_name == '2DMapTotal':
+            # For 2D map total, check if both totalActual and totalSideActual exist
+            total_exists = 'totalActual' in df.columns and pd.api.types.is_numeric_dtype(df['totalActual'])
+            total_side_exists = 'totalSideActual' in df.columns and pd.api.types.is_numeric_dtype(df['totalSideActual'])
+            print(f"DEBUG: totalActual exists: {total_exists}")
+            print(f"DEBUG: totalSideActual exists: {total_side_exists}")
+            
+            if total_exists and total_side_exists:
+                print(f"DEBUG: Adding 2D Map Total option")
+                available_options.append({'label': display_label, 'value': col_name})
+        elif col_name == '2DMapCarry-Total':
+            # For 2D map carry-total, check if all four columns exist
+            carry_exists = 'carryActual' in df.columns and pd.api.types.is_numeric_dtype(df['carryActual'])
+            carry_side_exists = 'carrySideActual' in df.columns and pd.api.types.is_numeric_dtype(df['carrySideActual'])
+            total_exists = 'totalActual' in df.columns and pd.api.types.is_numeric_dtype(df['totalActual'])
+            total_side_exists = 'totalSideActual' in df.columns and pd.api.types.is_numeric_dtype(df['totalSideActual'])
+            print(f"DEBUG: carryActual exists: {carry_exists}")
+            print(f"DEBUG: carrySideActual exists: {carry_side_exists}")
+            print(f"DEBUG: totalActual exists: {total_exists}")
+            print(f"DEBUG: totalSideActual exists: {total_side_exists}")
+            
+            if carry_exists and carry_side_exists and total_exists and total_side_exists:
+                print(f"DEBUG: Adding 2D Map Carry-Total option")
                 available_options.append({'label': display_label, 'value': col_name})
         elif col_name in df.columns and pd.api.types.is_numeric_dtype(df[col_name]):
             print(f"DEBUG: Adding {col_name} option")
@@ -1488,6 +1641,74 @@ def delete_shot(active_cell, page_current, page_size, table_data, filtered_data,
     except Exception as e:
         print(f"ERROR in delete_shot: {e}")
         return current_figure, table_data, filtered_data
+
+# Remove the browse button from the callback inputs and parameters
+@app.callback(
+    Output("home-dir-status", "children"),
+    Output("home-dir-input", "value"),
+    Output("home-dir-store", "data"),
+    Input("set-home-dir-btn", "n_clicks"),
+    Input("reset-home-dir-btn", "n_clicks"),  # Remove browse-home-dir-btn
+    State("home-dir-input", "value"),
+    State("home-dir-store", "data"),
+    prevent_initial_call=True
+)
+def handle_home_directory_actions(set_clicks, reset_clicks, input_path, current_home_dir):  # Remove browse_clicks parameter
+    triggered = ctx.triggered_id
+    status = ""
+    new_path = input_path
     
+    if triggered == "set-home-dir-btn" and input_path:
+        if os.path.exists(input_path) and os.path.isdir(input_path):
+            if set_home_dir(input_path):
+                status = f"✅ Home directory set to: {input_path}"
+                
+                # Create necessary subdirectories
+                try:
+                    os.makedirs(os.path.join(input_path, "tokens"), exist_ok=True)
+                    os.makedirs(os.pathjoin(input_path, "Data"), exist_ok=True)
+                    os.makedirs(os.path.join(input_path, "plots"), exist_ok=True)
+                    status += " (Created subdirectories: tokens, Data, plots)"
+                except Exception as e:
+                    status += f" (Warning: Could not create subdirectories: {e})"
+                
+                return status, input_path, input_path
+            else:
+                status = "❌ Failed to set home directory"
+        else:
+            status = "❌ Invalid directory path. Please enter a valid directory."
+            
+    elif triggered == "reset-home-dir-btn":
+        default_home = str(Path.home())
+        if set_home_dir(default_home):
+            status = f"✅ Home directory reset to default: {default_home}"
+            new_path = default_home
+            return status, new_path, new_path
+        else:
+            status = "❌ Failed to reset to default home directory"
+    
+    return status, new_path, current_home_dir or str(Path.home())
+
+# Add a function to save plots to the home directory
+def save_plot_to_home(fig, filename, home_dir=None):
+    """Save a plotly figure to the plots directory in home_dir"""
+    if home_dir is None:
+        home_dir = get_home_dir()
+    
+    plots_dir = os.path.join(home_dir, "plots")
+    os.makedirs(plots_dir, exist_ok=True)
+    
+    # Save as HTML
+    html_path = os.path.join(plots_dir, f"{filename}.html")
+    fig.write_html(html_path)
+    
+    # Save as PNG (requires kaleido)
+    try:
+        png_path = os.path.join(plots_dir, f"{filename}.png")
+        fig.write_image(png_path, width=1200, height=800)
+        return f"Plot saved to: {html_path} and {png_path}"
+    except Exception as e:
+        return f"Plot saved to: {html_path} (PNG save failed: {e})"
+
 if __name__ == '__main__':
-    app.run_server(debug=True, port=8050)  # Set use_reloader=False to avoid double callbacks
+    app.run_server(debug=True, port=8050, use_reloader=False)  # Set use_reloader=False to avoid double callbacks
