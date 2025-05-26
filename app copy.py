@@ -15,7 +15,6 @@ spec = importlib.util.spec_from_file_location("trackman", "trackman.py")
 trackman = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(trackman)
 
-
 def load_data(username, ball_type):
     data_dir = os.path.join('Data', username, ball_type)
     if not os.path.exists(data_dir):
