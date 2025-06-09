@@ -1,0 +1,99 @@
+FROM python:3.9-slim
+
+WORKDIR /app
+
+# Install system dependencies including jq
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    curl \
+    net-tools \
+    wget \
+    gnupg \
+    unzip \
+    xvfb \
+    fonts-liberation \
+    libnss3 \
+    libxss1 \
+    libappindicator3-1 \
+    libasound2 \
+    libxshmfence1 \
+    libgbm1 \
+    libgtk-3-0 \
+    libx11-xcb1 \
+    jq \
+    --no-install-recommends && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install Google Chrome (latest stable)
+RUN wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | apt-key add - \
+    && echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google-chrome.list \
+    && apt-get update \
+    && apt-get install -y google-chrome-stable \
+    && rm -rf /var/lib/apt/lists/*
+
+# Get Chrome version and install matching ChromeDriver using new API
+RUN CHROME_VERSION=$(google-chrome --version | cut -d " " -f3) \
+    && echo "Chrome version: $CHROME_VERSION" \
+    && CHROMEDRIVER_URL=$(curl -s "https://googlechromelabs.github.io/chrome-for-testing/known-good-versions-with-downloads.json" | \
+       jq -r ".versions[] | select(.version==\"$CHROME_VERSION\") | .downloads.chromedriver[]? | select(.platform==\"linux64\") | .url" | head -1) \
+    && if [ -z "$CHROMEDRIVER_URL" ] || [ "$CHROMEDRIVER_URL" = "null" ]; then \
+         echo "No exact match found, trying latest stable version..." && \
+         CHROMEDRIVER_URL=$(curl -s "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions.json" | \
+         jq -r ".channels.Stable.downloads.chromedriver[]? | select(.platform==\"linux64\") | .url" | head -1); \
+       fi \
+    && echo "ChromeDriver URL: $CHROMEDRIVER_URL" \
+    && if [ -z "$CHROMEDRIVER_URL" ] || [ "$CHROMEDRIVER_URL" = "null" ]; then \
+         echo "Could not find ChromeDriver, using webdriver-manager fallback" && \
+         touch /tmp/use_webdriver_manager; \
+       else \
+         wget -O /tmp/chromedriver.zip "$CHROMEDRIVER_URL" && \
+         unzip /tmp/chromedriver.zip -d /tmp/ && \
+         mv /tmp/chromedriver-linux64/chromedriver /usr/local/bin/ && \
+         rm -rf /tmp/chromedriver* && \
+         chmod +x /usr/local/bin/chromedriver; \
+       fi
+
+# Verify installation
+RUN if [ -f /usr/local/bin/chromedriver ]; then \
+      google-chrome --version && chromedriver --version; \
+    else \
+      echo "ChromeDriver will be managed by webdriver-manager"; \
+    fi
+
+# Set proper permissions for X11 sockets
+RUN mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix
+
+# Copy and install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy app source code
+COPY . .
+
+# Create app folders
+RUN mkdir -p /app/Data /app/tokens /app/plots
+
+# Create non-root user and assign ownership
+RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
+
+# Create startup script to launch Xvfb and then the app
+RUN echo '#!/bin/bash\n\
+export DISPLAY=:99\n\
+Xvfb :99 -screen 0 1024x768x24 -ac &\n\
+sleep 2\n\
+exec python app.py' > /app/start.sh && chmod +x /app/start.sh && chown appuser:appuser /app/start.sh
+
+# Environment variables
+ENV DISPLAY=:99
+ENV HOST=0.0.0.0
+ENV PORT=8050
+
+USER appuser
+EXPOSE 8050
+
+# Optional healthcheck
+HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8050/ || exit 1
+
+CMD ["/app/start.sh"]

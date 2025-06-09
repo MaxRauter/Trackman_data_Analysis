@@ -11,8 +11,6 @@ from datetime import datetime
 import threading
 import numpy as np
 from pathlib import Path
-import base64
-import io
 
 # Import the trackman module for authentication - with comprehensive error handling
 TRACKMAN_AVAILABLE = False
@@ -104,12 +102,6 @@ def set_home_dir(path):
 
 # Update the load_data function to use the home directory
 def load_data(username, ball_type, home_dir=None):
-    # Check for uploaded data first
-    uploaded_df = load_uploaded_data(username)
-    if not uploaded_df.empty:
-        print(f"DEBUG: Using uploaded data for {username} (ball_type ignored)")
-        return uploaded_df
-    
     if home_dir is None:
         home_dir = get_home_dir()
     
@@ -213,6 +205,34 @@ app.layout = html.Div([
                         html.Button("Logout All", id="logout-all-btn"),
                     ], style={'margin-bottom': '20px'}),
                     
+                    html.H4("TrackMan Login"),
+                    html.Div([
+                        html.Label("Username/Email:", style={'margin-right': '10px'}),
+                        dcc.Input(
+                            id="trackman-username",
+                            type="text",
+                            placeholder="Enter TrackMan username",
+                            style={'width': '200px', 'margin-right': '10px'}
+                        ),
+                    ], style={'margin-bottom': '10px'}),
+
+                    html.Div([
+                        html.Label("Password:", style={'margin-right': '10px'}),
+                        dcc.Input(
+                            id="trackman-password",
+                            type="password",
+                            placeholder="Enter TrackMan password",
+                            style={'width': '200px', 'margin-right': '10px'}
+                        ),
+                    ], style={'margin-bottom': '10px'}),
+
+                    html.Div([
+                        html.Button("Login Automatically", id="auto-login-btn",
+                                    style={'background-color': '#28a745', 'color': 'white', 
+                                        'padding': '10px 20px', 'border': 'none', 
+                                        'border-radius': '5px'}),
+                    ], style={'margin-bottom': '20px'}),
+                    
                     html.H4("Save New Token"),
                     html.Div([
                         html.Label("Username/Email:", style={'margin-right': '10px'}),
@@ -229,7 +249,6 @@ app.layout = html.Div([
                 ])
             ], style={'padding': '20px'})
         ]),
-        
         # Activities Tab
         dcc.Tab(label="Activities", value="activities", children=[
             html.Div([
@@ -295,53 +314,9 @@ app.layout = html.Div([
         # Analysis Tab
         dcc.Tab(label="Analysis", value="analysis", children=[
             html.Div([
-                # User selection and CSV upload side by side
                 html.Div([
-                    html.Div([
-                        html.Label("User:"),
-                        dcc.Dropdown(id='user-dropdown', style={'width': '200px'}),
-                    ], style={'width': '48%', 'display': 'inline-block', 'vertical-align': 'top'}),
-                    
-                    html.Div([
-                        html.Label("Upload CSV Files:"),
-                        dcc.Upload(
-                            id='upload-golf-data',
-                            children=html.Div([
-                                'Drag & Drop or ',
-                                html.A('Select Files')
-                            ]),
-                            style={
-                                'width': '100%',
-                                'height': '50px',
-                                'lineHeight': '50px',
-                                'borderWidth': '1px',
-                                'borderStyle': 'dashed',
-                                'borderRadius': '5px',
-                                'textAlign': 'center',
-                                'backgroundColor': '#f9f9f9',
-                                'fontSize': '14px'
-                            },
-                            multiple=True,
-                            accept='.csv'
-                        ),
-                        html.Div([
-                            html.Button("Clear All Uploads", id='clear-uploads-btn', 
-                                    style={'margin-top': '5px', 'margin-right': '10px', 
-                                            'background-color': '#dc3545', 'color': 'white', 
-                                            'border': 'none', 'padding': '5px 10px', 'border-radius': '3px'}),
-                            html.Button("Show Upload Info", id='show-upload-info-btn',
-                                    style={'margin-top': '5px', 'background-color': '#17a2b8', 
-                                            'color': 'white', 'border': 'none', 'padding': '5px 10px', 
-                                            'border-radius': '3px'})
-                        ]),
-                    ], style={'width': '48%', 'display': 'inline-block', 'vertical-align': 'top', 'margin-left': '4%'}),
-                ], style={'margin-bottom': '10px'}),
-                
-                # Upload status
-                html.Div(id='upload-status', style={'margin-bottom': '10px', 'color': 'green', 'font-weight': 'bold'}),
-
-
-                html.Div([
+                    html.Label("User:"),
+                    dcc.Dropdown(id='user-dropdown', style={'width': '200px', 'display': 'inline-block', 'margin-right': '10px'}),
                     html.Label("Ball Type:"),
                     dcc.RadioItems(
                         id='ball-type-radio',
@@ -349,10 +324,6 @@ app.layout = html.Div([
                         value='range',
                         labelStyle={'display': 'inline-block', 'margin-right': '10px'}
                     ),
-                    html.Small(
-                        "Note: Ball type selection is disabled when using uploaded files", 
-                        style={'color': 'gray', 'font-style': 'italic', 'margin-left': '10px'}
-                    )
                 ], style={'margin-bottom': '20px'}),
                 
                 html.Div([
@@ -549,6 +520,120 @@ def update_token_dropdown(active_tab, home_dir):
     return [], None
 
 @app.callback(
+    Output("login-status", "children", allow_duplicate=True),
+    Output("save-token-btn", "disabled", allow_duplicate=True),
+    Output("selected-username-store", "data", allow_duplicate=True),
+    Input("auto-login-btn", "n_clicks"),
+    State("trackman-username", "value"),
+    State("trackman-password", "value"),
+    State("home-dir-store", "data"),
+    prevent_initial_call=True
+)
+def handle_automated_login(n_clicks, username, password, home_dir):
+    if not n_clicks or not username or not password:
+        raise dash.exceptions.PreventUpdate
+    
+    try:
+        # Set token directory
+        if home_dir:
+            trackman.TOKEN_DIR = os.path.join(home_dir, "tokens")
+        
+        # Create API instance and login
+        api = trackman.TrackManAPI()
+        
+        if api.login(username, password):
+            # Save the token
+            trackman.save_token(api.auth_token, username)
+            
+            status = f"✅ Successfully logged in and saved token for {username}!"
+            return status, False, username
+        else:
+            status = "❌ Login failed. Please check credentials and try again."
+            return status, True, ""
+            
+    except Exception as e:
+        status = f"❌ Login error: {str(e)}"
+        return status, True, ""
+
+@app.callback(
+    Output("login-status", "children", allow_duplicate=True),
+    Output("save-token-btn", "disabled", allow_duplicate=True),
+    Output("selected-username-store", "data", allow_duplicate=True),
+    Output("manual-token-input", "value"),
+    Input("manual-token-btn", "n_clicks"),
+    State("manual-token-input", "value"),
+    State("username-input", "value"),
+    State("home-dir-store", "data"),
+    prevent_initial_call=True
+)
+def handle_manual_token(n_clicks, token_value, username_input, home_dir):
+    if not n_clicks or not token_value:
+        raise dash.exceptions.PreventUpdate
+    
+    # Set the home directory for token operations
+    if home_dir:
+        trackman.TOKEN_DIR = os.path.join(home_dir, "tokens")
+    else:
+        trackman.TOKEN_DIR = os.path.join(str(Path.home()), "tokens")
+    
+    # Clean the token (remove Bearer prefix if present)
+    clean_token = token_value.strip()
+    if clean_token.startswith('Bearer '):
+        clean_token = clean_token[7:]
+    
+    # Test the token
+    api = trackman.TrackManAPI()
+    api.auth_token = clean_token
+    api.headers["Authorization"] = f"Bearer {clean_token}"
+    
+    if api.test_connection():
+        # Token is valid
+        if username_input:
+            # Save the token
+            trackman.save_token(clean_token, username_input.strip())
+            status = f"✅ Token validated and saved for {username_input}!"
+            selected_username = username_input.strip()
+            save_disabled = False
+        else:
+            status = "✅ Token is valid! Please enter a username above to save it."
+            selected_username = ""
+            save_disabled = True
+        
+        return status, save_disabled, selected_username, ""  # Clear the token input
+    else:
+        return "❌ Invalid token. Please check and try again.", True, "", token_value
+
+@app.callback(
+    Output("login-status", "children", allow_duplicate=True),
+    Input("new-login-btn", "n_clicks"),
+    prevent_initial_call=True
+)
+def handle_new_login_redirect(n_clicks):
+    if not n_clicks:
+        raise dash.exceptions.PreventUpdate
+    
+    # Create the TrackMan login URL
+    login_url = "https://app.trackman.com/login"
+    
+    return html.Div([
+        html.P("Please complete the following steps:", style={'font-weight': 'bold'}),
+        html.Ol([
+            html.Li([
+                "Click here to open TrackMan login: ",
+                html.A("TrackMan Login", href=login_url, target="_blank", 
+                      style={'color': 'blue', 'text-decoration': 'underline'})
+            ]),
+            html.Li("Login with your TrackMan credentials"),
+            html.Li("Once logged in, open Developer Tools (F12)"),
+            html.Li("Go to Application → Local Storage → app.trackman.com"),
+            html.Li("Find 'authToken' and copy the value"),
+            html.Li("Paste the token in the 'Manual Token Input' section above")
+        ]),
+        html.P("After pasting the token, click 'Use Manual Token' to save it.", 
+               style={'margin-top': '10px', 'font-weight': 'bold', 'color': 'green'})
+    ])
+
+@app.callback(
     Output("login-status", "children"),
     Output("save-token-btn", "disabled"),
     Output("selected-username-store", "data"),
@@ -593,7 +678,13 @@ def handle_login_actions(use_token, new_login, logout, logout_all, save_token, s
             status = "No token found for selected user"
             
     elif triggered == "new-login-btn":
-        status = f"Starting browser login... (Tokens will be saved to: {os.path.join(home_dir, 'tokens')})"
+        login_url = "https://app.trackman.com/login"
+        status = html.Div([
+            html.P("Browser login not available in server mode.", style={'color': 'orange', 'font-weight': 'bold'}),
+            html.P("Please use manual token input above or click the link below:"),
+            html.A("Open TrackMan Login", href=login_url, target="_blank", 
+                style={'color': 'blue', 'text-decoration': 'underline', 'font-size': '16px'})
+        ])
         save_disabled = False
         
     elif triggered == "logout-btn" and selected_user:
@@ -812,200 +903,6 @@ def handle_activities_actions(refresh_clicks, download_selected_clicks, download
     
     return "", [], []
 
-@app.callback(
-    Output('ball-type-radio', 'style', allow_duplicate=True),
-    Input('user-dropdown', 'value'),
-    prevent_initial_call=True
-)
-def control_ball_type_availability(selected_user):
-    """Enable/disable ball type selection based on whether uploaded data is being used"""
-    
-    if selected_user == 'Uploaded Data':
-        # Uploaded data - disable ball type selection
-        return {
-            'margin-bottom': '20px', 
-            'opacity': '0.5', 
-            'pointer-events': 'none'
-        }
-    else:
-        # Server data - enable ball type selection
-        return {'margin-bottom': '20px'}
-
-@app.callback(
-    Output('upload-status', 'children'),
-    Output('user-dropdown', 'options', allow_duplicate=True),
-    Output('user-dropdown', 'value', allow_duplicate=True),
-    Output('ball-type-radio', 'style'),
-    Input('upload-golf-data', 'contents'),
-    State('upload-golf-data', 'filename'),
-    prevent_initial_call=True
-)
-def handle_file_upload(contents, filenames):
-    if not contents:
-        return "", [], None, {'margin-bottom': '20px'}
-    
-    if not isinstance(contents, list):
-        contents = [contents]
-        filenames = [filenames]
-    
-    try:
-        uploaded_data = {}
-        files_metadata = {}
-        total_shots = 0
-        new_files = 0
-        duplicate_files = []
-        error_files = []
-        
-        for content, filename in zip(contents, filenames):
-            try:
-                # Decode the uploaded file
-                content_type, content_string = content.split(',')
-                decoded = base64.b64decode(content_string)
-                file_size = len(decoded)
-                
-                # Check for duplicate
-                is_duplicate, existing_filename = is_duplicate_file(filename, content_string, file_size)
-                
-                if is_duplicate:
-                    duplicate_files.append(f"{filename} (duplicate of {existing_filename})")
-                    continue
-                
-                # Read CSV
-                df = pd.read_csv(io.StringIO(decoded.decode('utf-8')))
-                
-                if df.empty:
-                    error_files.append(f"{filename} (empty file)")
-                    continue
-                
-                # Extract user and session info from filename or add defaults
-                if 'Session ID' not in df.columns:
-                    session_name = filename.replace('.csv', '')
-                    df['Session ID'] = session_name
-                
-                # Add user identifier
-                username = 'Uploaded Data'
-                if username not in uploaded_data:
-                    uploaded_data[username] = []
-                
-                uploaded_data[username].append(df)
-                total_shots += len(df)
-                new_files += 1
-                
-                # Store file metadata
-                files_metadata[filename] = {
-                    'hash': calculate_file_hash(content_string),
-                    'size': file_size,
-                    'shots': len(df),
-                    'upload_time': datetime.now().isoformat()
-                }
-                
-            except Exception as e:
-                error_files.append(f"{filename} (error: {str(e)})")
-                continue
-        
-        # Combine all new uploaded data
-        for username, dfs in uploaded_data.items():
-            if dfs:  # Only if we have new data
-                combined_df = pd.concat(dfs, ignore_index=True)
-                store_uploaded_data(username, combined_df, files_metadata)
-        
-        # Create status message
-        status_parts = []
-        if new_files > 0:
-            status_parts.append(f"✅ Successfully uploaded {new_files} new files with {total_shots} shots")
-        
-        if duplicate_files:
-            status_parts.append(f"⚠️ Ignored {len(duplicate_files)} duplicate files: {', '.join(duplicate_files)}")
-        
-        if error_files:
-            status_parts.append(f"❌ Failed to process {len(error_files)} files: {', '.join(error_files)}")
-        
-        # Add persistent storage info
-        upload_info = get_uploaded_files_info()
-        if upload_info['total_files'] > 0:
-            status_parts.append(f"📊 Total in memory: {upload_info['total_files']} files, {upload_info['total_shots']} shots")
-        
-        status = " | ".join(status_parts) if status_parts else "No new files to upload"
-        
-        # Update user dropdown - check if we have any uploaded data
-        current_uploaded_data = load_uploaded_data('Uploaded Data')
-        if not current_uploaded_data.empty:
-            user_options = [{'label': 'Uploaded Data', 'value': 'Uploaded Data'}]
-            selected_user = 'Uploaded Data'
-            
-            # Disable ball type selection for uploaded data
-            ball_type_style = {
-                'margin-bottom': '20px', 
-                'opacity': '0.5', 
-                'pointer-events': 'none'
-            }
-        else:
-            user_options = []
-            selected_user = None
-            ball_type_style = {'margin-bottom': '20px'}
-        
-        return status, user_options, selected_user, ball_type_style
-        
-    except Exception as e:
-        return f"❌ Error processing files: {str(e)}", [], None, {'margin-bottom': '20px'}
-
-# Global storage for uploaded data (in production, use Redis or database)
-UPLOADED_DATA = {}
-UPLOADED_FILES_METADATA = {}  # Track uploaded file metadata to detect duplicates
-
-def calculate_file_hash(content_string):
-    """Calculate a hash of the file content to detect duplicates"""
-    import hashlib
-    return hashlib.md5(content_string.encode()).hexdigest()
-
-def is_duplicate_file(filename, content_string, file_size):
-    """Check if this file has already been uploaded"""
-    file_hash = calculate_file_hash(content_string)
-    
-    # Check if we've seen this exact file content before
-    for stored_filename, metadata in UPLOADED_FILES_METADATA.items():
-        if (metadata['hash'] == file_hash and 
-            metadata['size'] == file_size):
-            return True, stored_filename
-    
-    return False, None
-
-def store_uploaded_data(username, df, files_metadata):
-    """Store uploaded data globally with metadata tracking"""
-    global UPLOADED_DATA, UPLOADED_FILES_METADATA
-    
-    # Store or append to existing data
-    if username in UPLOADED_DATA:
-        # Append to existing data
-        UPLOADED_DATA[username] = pd.concat([UPLOADED_DATA[username], df], ignore_index=True)
-    else:
-        UPLOADED_DATA[username] = df
-    
-    # Store file metadata
-    UPLOADED_FILES_METADATA.update(files_metadata)
-
-def load_uploaded_data(username):
-    """Load uploaded data"""
-    global UPLOADED_DATA
-    return UPLOADED_DATA.get(username, pd.DataFrame())
-
-def get_uploaded_files_info():
-    """Get information about uploaded files"""
-    global UPLOADED_FILES_METADATA, UPLOADED_DATA
-    
-    info = {
-        'total_files': len(UPLOADED_FILES_METADATA),
-        'total_shots': sum(len(df) for df in UPLOADED_DATA.values()),
-        'files': list(UPLOADED_FILES_METADATA.keys())
-    }
-    return info
-
-def clear_uploaded_data():
-    """Clear all uploaded data (useful for manual refresh)"""
-    global UPLOADED_DATA, UPLOADED_FILES_METADATA
-    UPLOADED_DATA = {}
-    UPLOADED_FILES_METADATA = {}
-
 # Analysis callbacks (existing ones remain the same)
 @app.callback(
     Output('session-dropdown', 'options'),
@@ -1017,49 +914,29 @@ def clear_uploaded_data():
     Input('ball-type-radio', 'value'),
     Input('session-dropdown', 'value'),
     Input('comparison-radio', 'value'),
-    Input('attribute-dropdown', 'value'),  # Move this to Input to trigger when attribute changes
-    prevent_initial_call=True
+    State('attribute-dropdown', 'value'),
 )
 def update_sessions_and_clubs(username, ball_type, selected_sessions, comparison_mode, attribute):
-    # Allow the callback to run even if attribute is None initially
-    if not username:
+    if not username or not attribute:
         return [], [], [], [], True
-    
-    # Add this debug print to see what's happening
-    print(f"DEBUG: update_sessions_and_clubs called with username={username}, comparison_mode={comparison_mode}, attribute={attribute}")
-    
+        
     df = load_data(username, ball_type)
-    
-    # Add this check for empty dataframe
-    if df.empty:
-        print(f"DEBUG: No data found for {username}")
-        return [], [], [], [], True
-    
-    # If attribute is None, use carryActual as default or any numeric column
-    if not attribute:
-        if 'carryActual' in df.columns:
-            attribute = 'carryActual'
-        else:
-            # Find any numeric column
-            numeric_cols = [col for col in df.columns if pd.api.types.is_numeric_dtype(df[col])]
-            if numeric_cols:
-                attribute = numeric_cols[0]
-            else:
-                print("DEBUG: No numeric columns found")
-                return [], [], [], [], True
-    
-    print(f"DEBUG: Using attribute: {attribute}")
     
     # Handle filtering for 2D Map attributes
     if attribute == '2DMapCarry':
+        # Filter out rows where either carryActual or carrySideActual is null/NaN
         df = df.dropna(subset=['carryActual', 'carrySideActual'])
     elif attribute == '2DMapTotal':
+        # Filter out rows where either totalActual or totalSideActual is null/NaN
         df = df.dropna(subset=['totalActual', 'totalSideActual'])
     elif attribute == '2DMapCarry-Total':
+        # Filter out rows where any of the four required columns is null/NaN
         df = df.dropna(subset=['carryActual', 'carrySideActual', 'totalActual', 'totalSideActual'])
     elif attribute == 'custom':
+        # Do NOT filter by attribute for custom
         pass
-    elif attribute in df.columns:
+    else:
+        # Filter out rows where the selected attribute is null/NaN
         df = df.dropna(subset=[attribute])
     
     # Get all available sessions with enhanced information
@@ -1069,8 +946,9 @@ def update_sessions_and_clubs(username, ball_type, selected_sessions, comparison
     for session in sessions:
         session_data = df[df['Session ID'] == session]
         shot_count = len(session_data)
-        unique_clubs = session_data['Club'].nunique()
+        unique_clubs = session_data['Club'].nunique();
         
+        # Create enhanced label with shot count and club count
         label = f"{session} (clubs: {unique_clubs}, n={shot_count})"
         session_options.append({'label': label, 'value': session})
     
@@ -1086,6 +964,7 @@ def update_sessions_and_clubs(username, ball_type, selected_sessions, comparison
     else:
         filtered_df = df
     
+    # Get clubs from filtered data
     clubs = sorted([c for c in filtered_df['Club'].unique() if pd.notna(c)])
     club_options = [{'label': c, 'value': c} for c in clubs]
     
@@ -1097,20 +976,7 @@ def update_sessions_and_clubs(username, ball_type, selected_sessions, comparison
     if comparison_mode == 'time' and clubs:
         club_value = [clubs[0]] if clubs else []
     
-    print(f"DEBUG: Returning {len(session_options)} sessions, {len(club_options)} clubs")
     return session_options, selected_sessions, club_options, club_value, multi_selection
-
-@app.callback(
-    Output('comparison-radio', 'value', allow_duplicate=True),
-    Input('user-dropdown', 'value'),
-    prevent_initial_call=True
-)
-def set_default_comparison_mode(username):
-    """Set default comparison mode when user changes"""
-    if username == 'Uploaded Data':
-        return 'clubs'  # Set default to clubs comparison
-    else:
-        return 'clubs'  # Also set default for regular users
 
 @app.callback(
     Output("custom-xy-div", "style"),
@@ -1147,23 +1013,6 @@ def swap_xy_attributes(n_clicks, current_x, current_y):
     
     # Swap the values
     return current_y, current_x
-
-@app.callback(
-    Output('attribute-dropdown', 'value', allow_duplicate=True),
-    Input('user-dropdown', 'value'),
-    State('attribute-dropdown', 'options'),
-    prevent_initial_call=True
-)
-def set_default_attribute_for_uploaded_data(username, available_options):
-    """Set default attribute when uploaded data is selected"""
-    if username == 'Uploaded Data' and available_options:
-        # Set a default attribute immediately
-        if any(opt['value'] == 'carryActual' for opt in available_options):
-            return 'carryActual'
-        else:
-            return available_options[0]['value']
-    
-    raise dash.exceptions.PreventUpdate
 
 @app.callback(
     Output("selected-shots-table", "data", allow_duplicate=True),
@@ -1356,49 +1205,6 @@ def reset_all_shots(n_clicks, table_data, filtered_data, attribute, comparison_m
     return updated_fig, updated_table_data, updated_filtered_data, style_data_conditional
 
 @app.callback(
-    Output('upload-status', 'children', allow_duplicate=True),
-    Output('user-dropdown', 'options', allow_duplicate=True),
-    Output('user-dropdown', 'value', allow_duplicate=True),
-    Output('ball-type-radio', 'style', allow_duplicate=True),
-    Input('clear-uploads-btn', 'n_clicks'),
-    prevent_initial_call=True
-)
-def clear_all_uploads(n_clicks):
-    if not n_clicks:
-        raise dash.exceptions.PreventUpdate
-    
-    # Get info before clearing
-    upload_info = get_uploaded_files_info()
-    
-    # Clear all uploaded data
-    clear_uploaded_data()
-    
-    status = f"🗑️ Cleared {upload_info['total_files']} uploaded files ({upload_info['total_shots']} shots)"
-    
-    # Reset user dropdown and ball type style
-    return status, [], None, {'margin-bottom': '20px'}
-
-@app.callback(
-    Output('upload-status', 'children', allow_duplicate=True),
-    Input('show-upload-info-btn', 'n_clicks'),
-    prevent_initial_call=True
-)
-def show_upload_info(n_clicks):
-    if not n_clicks:
-        raise dash.exceptions.PreventUpdate
-    
-    upload_info = get_uploaded_files_info()
-    
-    if upload_info['total_files'] == 0:
-        return "📊 No files currently uploaded"
-    
-    files_list = ", ".join(upload_info['files'][:5])  # Show first 5 files
-    if len(upload_info['files']) > 5:
-        files_list += f" and {len(upload_info['files']) - 5} more..."
-    
-    return f"📊 Uploaded: {upload_info['total_files']} files, {upload_info['total_shots']} total shots | Files: {files_list}"
-
-@app.callback(
     Output('analysis-plot', 'figure'),
     Input('plot-btn', 'n_clicks'),
     State('user-dropdown', 'value'),
@@ -1506,7 +1312,7 @@ def generate_plot(n_clicks, username, ball_type, comparison_mode, plot_type, ses
             # Sort by average X values
             sorted_clubs = [club for club, _ in sorted(club_means, key=lambda x: x[1])]
         else:
-            sorted_clubs = clubs  # For 'time' comparison, just use the clubs as-is
+            sorted_clubs = clubs  # For time comparison, just use the clubs as-is
         
         print(f"DEBUG: sorted_clubs for custom plot: {sorted_clubs}")
         
@@ -1810,7 +1616,7 @@ def generate_plot(n_clicks, username, ball_type, comparison_mode, plot_type, ses
         # Check if plot_type is histogram (individual shots) or gaussian (means with error ellipses)
         if plot_type == 'histogram':
             if comparison_mode == 'clubs':
-# Multiple clubs comparison - show individual shots as scatter
+                # Multiple clubs comparison - show individual shots as scatter
                 # Create unique colors for each club-session combination
                 club_session_colors = {}
                 color_index = 0
@@ -2352,7 +2158,7 @@ def generate_plot(n_clicks, username, ball_type, comparison_mode, plot_type, ses
             sorted_clubs = [item['club'] for item in sorted(club_data, key=lambda x: x['avg_mean'])]
             
             if plot_type == 'histogram':
-# Multiple clubs comparison - show individual shots as scatter
+                # Multiple clubs comparison - show individual shots as scatter
                 # Create unique colors for each club-session combination
                 club_session_colors = {}
                 color_index = 0
@@ -3092,4 +2898,20 @@ def save_plot_to_home(fig, filename, home_dir=None):
         return f"Plot saved to: {html_path} (PNG save failed: {e})"
 
 if __name__ == '__main__':
-    app.run_server(debug=True, port=8050)  # Set use_reloader=False to avoid double callbacks
+    import os
+    
+    # Get configuration from environment variables
+    debug = os.getenv('DEBUG', 'False').lower() == 'true'
+    host = os.getenv('HOST', '0.0.0.0')  # Important: use 0.0.0.0 for Docker
+    port = int(os.getenv('PORT', 8050))
+    
+    print(f"Starting server on {host}:{port} (debug={debug})")
+    
+    app.run_server(
+        debug=debug,
+        host=host,
+        port=port,
+        dev_tools_hot_reload=False,
+        dev_tools_ui=False,
+        dev_tools_props_check=False
+    )

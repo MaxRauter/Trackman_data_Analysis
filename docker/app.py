@@ -552,6 +552,10 @@ def update_token_dropdown(active_tab, home_dir):
     Output("login-status", "children"),
     Output("save-token-btn", "disabled"),
     Output("selected-username-store", "data"),
+    Output("main-tabs", "value"),  # Add this to control tab switching
+    Output("activities-table", "data", allow_duplicate=True),  # Add this to update activities
+    Output("activities-store", "data", allow_duplicate=True),  # Add this to store activities
+    Output("activities-log", "children", allow_duplicate=True),  # Add this to show log
     Input("use-token-btn", "n_clicks"),
     Input("new-login-btn", "n_clicks"),
     Input("logout-btn", "n_clicks"),
@@ -559,7 +563,7 @@ def update_token_dropdown(active_tab, home_dir):
     Input("save-token-btn", "n_clicks"),
     State("token-dropdown", "value"),
     State("username-input", "value"),
-    State("home-dir-store", "data"),  # Add this state
+    State("home-dir-store", "data"),
     prevent_initial_call=True
 )
 def handle_login_actions(use_token, new_login, logout, logout_all, save_token, selected_user, username_input, home_dir):
@@ -567,6 +571,10 @@ def handle_login_actions(use_token, new_login, logout, logout_all, save_token, s
     status = ""
     save_disabled = True
     selected_username = ""
+    current_tab = "login"  # Default to login tab
+    activities_table = []
+    activities_store = []
+    activities_log = ""
     
     # Set the home directory for token operations FIRST
     if home_dir:
@@ -576,7 +584,7 @@ def handle_login_actions(use_token, new_login, logout, logout_all, save_token, s
     
     # Now get tokens from the correct directory
     api = trackman.TrackManAPI()
-    tokens = trackman.check_saved_tokens()  # This will now use the updated TOKEN_DIR
+    tokens = trackman.check_saved_tokens()
     
     if triggered == "use-token-btn" and selected_user:
         token = tokens.get(selected_user)
@@ -587,6 +595,50 @@ def handle_login_actions(use_token, new_login, logout, logout_all, save_token, s
                 status = f"Successfully logged in as {selected_user} (Home: {home_dir})"
                 save_disabled = False
                 selected_username = selected_user
+                
+                # AUTO-FETCH ACTIVITIES
+                try:
+                    print(f"DEBUG: Auto-fetching activities for {selected_user}")
+                    activities_data = api.get_activity_list(limit=20)
+                    if activities_data:
+                        # Filter for range practice activities
+                        range_activities = [a for a in activities_data if a.get("kind") == "RANGE_PRACTICE"]
+                        
+                        if range_activities:
+                            # Sort chronologically (oldest first)
+                            range_activities = sorted(range_activities, key=lambda x: x.get("time", ""))
+                            
+                            # Prepare table data
+                            activities_table = []
+                            for i, activity in enumerate(range_activities):
+                                activity_time = activity.get("time", "Unknown date")
+                                try:
+                                    dt = datetime.fromisoformat(activity_time.replace('Z', '+00:00'))
+                                    date_str = dt.strftime("%Y-%m-%d %H:%M")
+                                except Exception:
+                                    date_str = activity_time[:16].replace('T', ' ') if activity_time else "Unknown"
+                                
+                                activities_table.append({
+                                    "ID": i + 1,
+                                    "Date": date_str,
+                                    "Type": activity.get("kind", "Unknown"),
+                                })
+                            
+                            activities_store = range_activities
+                            activities_log = f"✅ Auto-loaded {len(range_activities)} range practice activities (sorted chronologically, oldest = #1)"
+                            current_tab = "activities"  # Switch to activities tab
+                            status += f" | Found {len(range_activities)} activities"
+                        else:
+                            activities_log = "No range practice activities found"
+                            current_tab = "activities"  # Still switch to show the empty state
+                    else:
+                        activities_log = "No activities found"
+                        current_tab = "activities"  # Still switch to show the empty state
+                        
+                except Exception as e:
+                    activities_log = f"❌ Error fetching activities: {str(e)}"
+                    print(f"DEBUG: Error auto-fetching activities: {e}")
+                    # Don't switch tabs if there's an error
             else:
                 status = "Token is invalid, please login again"
         else:
@@ -594,48 +646,144 @@ def handle_login_actions(use_token, new_login, logout, logout_all, save_token, s
             
     elif triggered == "new-login-btn":
         status = f"Starting browser login... (Tokens will be saved to: {os.path.join(home_dir, 'tokens')})"
-        save_disabled = False
+
+        try:
+            # Create API instance and attempt login
+            api = trackman.TrackManAPI()
+            
+            # Start the login process (this will open browser)
+            success = api.login()
+            
+            if success and api.auth_token:
+                # Test the token immediately
+                if api.test_connection():
+                    status += " - Login successful! Please enter username to save token."
+                    save_disabled = False
+                    
+                    # AUTO-FETCH ACTIVITIES FOR NEW LOGIN TOO
+                    try:
+                        print(f"DEBUG: Auto-fetching activities after new login")
+                        activities_data = api.get_activity_list(limit=20)
+                        if activities_data:
+                            # Filter for range practice activities
+                            range_activities = [a for a in activities_data if a.get("kind") == "RANGE_PRACTICE"]
+                            
+                            if range_activities:
+                                # Sort chronologically (oldest first)
+                                range_activities = sorted(range_activities, key=lambda x: x.get("time", ""))
+                                
+                                # Prepare table data
+                                activities_table = []
+                                for i, activity in enumerate(range_activities):
+                                    activity_time = activity.get("time", "Unknown date")
+                                    try:
+                                        dt = datetime.fromisoformat(activity_time.replace('Z', '+00:00'))
+                                        date_str = dt.strftime("%Y-%m-%d %H:%M")
+                                    except Exception:
+                                        date_str = activity_time[:16].replace('T', ' ') if activity_time else "Unknown"
+                                    
+                                    activities_table.append({
+                                        "ID": i + 1,
+                                        "Date": date_str,
+                                        "Type": activity.get("kind", "Unknown"),
+                                    })
+                                
+                                activities_store = range_activities
+                                activities_log = f"✅ Auto-loaded {len(range_activities)} range practice activities (sorted chronologically, oldest = #1)"
+                                current_tab = "activities"  # Switch to activities tab
+                                status += f" | Found {len(range_activities)} activities"
+                            else:
+                                activities_log = "Login successful but no range practice activities found"
+                                current_tab = "activities"
+                        else:
+                            activities_log = "Login successful but no activities found"
+                            current_tab = "activities"
+                            
+                    except Exception as e:
+                        activities_log = f"Login successful but error fetching activities: {str(e)}"
+                        print(f"DEBUG: Error auto-fetching activities after new login: {e}")
+                        # Don't switch tabs if there's an error
+                else:
+                    status += " - Login successful but token validation failed."
+                    save_disabled = True
+            else:
+                status += " - Login failed. Please try again."
+                save_disabled = True
+                
+        except Exception as e:
+            status += f" - Error: {str(e)}"
+            save_disabled = True
+            
+        selected_username = ""
         
     elif triggered == "logout-btn" and selected_user:
         trackman.invalidate_token(selected_user)
         status = f"Logged out {selected_user}"
+        # Clear activities when logging out
+        activities_table = []
+        activities_store = []
+        activities_log = ""
         
     elif triggered == "logout-all-btn":
         trackman.invalidate_token()
         status = "Logged out all users"
+        # Clear activities when logging out all
+        activities_table = []
+        activities_store = []
+        activities_log = ""
         
     elif triggered == "save-token-btn" and username_input:
-        status = f"Token save functionality would save to: {os.path.join(home_dir, 'tokens')}"
-        save_disabled = True
+        # Get the current API instance with token from the new login
+        if hasattr(api, 'auth_token') and api.auth_token:
+            try:
+                # Save the token to file
+                token_file = os.path.join(trackman.TOKEN_DIR, f"{username_input}.token")
+                os.makedirs(trackman.TOKEN_DIR, exist_ok=True)
+                
+                with open(token_file, 'w') as f:
+                    f.write(api.auth_token)
+                
+                status = f"Token saved successfully for {username_input}"
+                save_disabled = True
+                selected_username = username_input
+                
+                # Keep the activities that were already fetched during login
+                # No need to fetch again
+                
+            except Exception as e:
+                status = f"Error saving token: {str(e)}"
+        else:
+            status = "No active token to save. Please login first."
         
-    return status, save_disabled, selected_username
+    return status, save_disabled, selected_username, current_tab, activities_table, activities_store, activities_log
 
-# Activities callbacks
 @app.callback(
-    Output("activities-log", "children"),
-    Output("activities-table", "data"),
-    Output("activities-store", "data"),
+    Output("activities-log", "children", allow_duplicate=True),
+    Output("activities-table", "data", allow_duplicate=True),
+    Output("activities-store", "data", allow_duplicate=True),
     Input("refresh-activities-btn", "n_clicks"),
     Input("download-selected-btn", "n_clicks"),
     Input("download-all-btn", "n_clicks"),
     Input("download-missing-btn", "n_clicks"),
-    Input("main-tabs", "value"),  # Add this input to trigger on tab change
     State("selected-username-store", "data"),
     State("ball-type-dropdown", "value"),
     State("activities-table", "selected_rows"),
     State("activities-store", "data"),
-    prevent_initial_call=False,  # Change this to False so it can trigger on initial load
+    State("activities-table", "data"),  # Add this to preserve existing table data
+    State("activities-log", "children"),  # Add this to preserve existing log
+    prevent_initial_call=True  # Change this back to True
 )
 def handle_activities_actions(refresh_clicks, download_selected_clicks, download_all_clicks, 
-                            download_missing_clicks, active_tab, username, ball_type, selected_rows, activities):
+                            download_missing_clicks, username, ball_type, selected_rows, 
+                            activities, existing_table_data, existing_log):
     triggered = ctx.triggered_id
     
-    # Auto-refresh when switching to activities tab
-    if triggered == "main-tabs" and active_tab == "activities":
-        triggered = "refresh-activities-btn"  # Treat as refresh action
+    # If no button was clicked, preserve existing data
+    if not triggered:
+        return existing_log or "", existing_table_data or [], activities or []
     
     if not username:
-        return "No user logged in. Please login first.", [], []
+        return "No user logged in. Please login first.", existing_table_data or [], activities or []
     
     # Initialize API with stored credentials
     api = trackman.TrackManAPI()
@@ -643,7 +791,7 @@ def handle_activities_actions(refresh_clicks, download_selected_clicks, download
     token = tokens.get(username)
     
     if not token:
-        return "No valid token found. Please login again.", [], []
+        return "No valid token found. Please login again.", existing_table_data or [], activities or []
     
     api.auth_token = token
     api.headers["Authorization"] = f"Bearer {token}"
@@ -684,25 +832,25 @@ def handle_activities_actions(refresh_clicks, download_selected_clicks, download
             return log_message, table_data, range_activities
             
         except Exception as e:
-            return f"Error fetching activities: {str(e)}", [], []
+            return f"Error fetching activities: {str(e)}", existing_table_data or [], activities or []
     
     elif triggered in ["download-selected-btn", "download-all-btn", "download-missing-btn"]:
         if not activities:
-            return "No activities available. Please refresh activities first.", [], []
+            return "No activities available. Please refresh activities first.", existing_table_data or [], activities or []
         
         try:
             if triggered == "download-selected-btn":
                 if not selected_rows:
-                    return "No activity selected. Please select an activity to download.", [], []
+                    return "No activity selected. Please select an activity to download.", existing_table_data, activities
                 
                 selected_idx = selected_rows[0]
                 if selected_idx >= len(activities):
-                    return "Invalid selection.", [], []
+                    return "Invalid selection.", existing_table_data, activities
                 
                 selected_activity = activities[selected_idx]
                 log_message = f"Downloading selected activity: {selected_activity.get('time', 'Unknown')[:10]}\n"
                 
-                # Download logic here - similar to interface.py
+                # Download logic here
                 if ball_type == "BOTH":
                     # Download both premium and range
                     for bt in ["PREMIUM", "RANGE"]:
@@ -726,7 +874,8 @@ def handle_activities_actions(refresh_clicks, download_selected_clicks, download
                         api.save_shots_to_csv(shot_data, ball_type=ball_type, username=username)
                         log_message += f"Downloaded {len(shot_data.get('shots', []))} {ball_type} shots\n"
                 
-                return log_message, [], []
+                # IMPORTANT: Preserve existing table and activities data
+                return log_message, existing_table_data, activities
                 
             elif triggered == "download-all-btn":
                 log_message = f"Downloading all {len(activities)} activities...\n"
@@ -752,7 +901,8 @@ def handle_activities_actions(refresh_clicks, download_selected_clicks, download
                             api.save_shots_to_csv(shot_data, ball_type=ball_type, username=username)
                             log_message += f"Session {idx+1}: Downloaded {len(shot_data.get('shots', []))} shots\n"
                 
-                return log_message, [], []
+                # IMPORTANT: Preserve existing table and activities data
+                return log_message, existing_table_data, activities
                 
             elif triggered == "download-missing-btn":
                 # Check for missing sessions
@@ -790,7 +940,7 @@ def handle_activities_actions(refresh_clicks, download_selected_clicks, download
                         missing_activities.append((idx, activity, missing_balls))
                 
                 if not missing_activities:
-                    return "All sessions are already saved. No missing sessions found.", [], []
+                    return "All sessions are already saved. No missing sessions found.", existing_table_data, activities
                 
                 log_message = f"Found {len(missing_activities)} missing sessions. Downloading...\n"
                 
@@ -805,12 +955,14 @@ def handle_activities_actions(refresh_clicks, download_selected_clicks, download
                             api.save_shots_to_csv(shot_data, ball_type=bt, username=username)
                             log_message += f"Session {idx+1}: Downloaded {len(shot_data.get('shots', []))} {bt} shots\n"
                 
-                return log_message, [], []
+                # IMPORTANT: Preserve existing table and activities data
+                return log_message, existing_table_data, activities
                 
         except Exception as e:
-            return f"Error during download: {str(e)}", [], []
+            return f"Error during download: {str(e)}", existing_table_data, activities
     
-    return "", [], []
+    # Default case - preserve existing data
+    return existing_log or "", existing_table_data or [], activities or []
 
 @app.callback(
     Output('ball-type-radio', 'style', allow_duplicate=True),

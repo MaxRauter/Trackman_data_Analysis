@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  golf-analytics:
+    build: 
+      context: .
+      dockerfile: dockerfile
+    ports:
+      - "8050:8050"
+    environment:
+      - DEBUG=false
+      - HOST=0.0.0.0
+      - PORT=8050
+      - CONTAINER_ENV=true
+    volumes:
+      - ./Data:/app/Data
+      - ./tokens:/app/tokens
+      - ./plots:/app/plots
+    restart: unless-stopped
+    container_name: golf-analytics
+    shm_size: 2gb

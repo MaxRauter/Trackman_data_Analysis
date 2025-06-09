@@ -16,7 +16,6 @@ from selenium.webdriver.support import expected_conditions as EC
 import re
 from pathlib import Path
 
-
 # Default token directory
 TOKEN_DIR = os.path.join(str(Path.home()), "tokens")
 
@@ -157,15 +156,6 @@ def open_in_serum(url, username=None, password=None):
     # Serum is a custom browser, replace with actual command to open it
     # This is a placeholder for demonstration purposes
     options = Options()
-    options.add_argument("--headless=new")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--disable-extensions")
-    options.add_argument("--remote-debugging-port=9222")  # optional, helps debugging
-    options.add_argument("--window-size=1920x1080")
-
-    driver = webdriver.Chrome(options=options)
     # comment this line to see the browser in action
     # options.add_argument("--headless")  
     driver = webdriver.Chrome(seleniumwire_options={}, options=options)

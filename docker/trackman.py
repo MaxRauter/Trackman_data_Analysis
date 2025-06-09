@@ -9,10 +9,12 @@ import urllib.parse
 from datetime import datetime
 import time
 from seleniumwire import webdriver
-from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.common.keys import Keys
 import re
 from pathlib import Path
 
@@ -164,22 +166,74 @@ def open_in_serum(url, username=None, password=None):
     options.add_argument("--disable-extensions")
     options.add_argument("--remote-debugging-port=9222")  # optional, helps debugging
     options.add_argument("--window-size=1920x1080")
-
-    driver = webdriver.Chrome(options=options)
+    print("Opening Serum browser...")
+    #driver = webdriver.Chrome()
     # comment this line to see the browser in action
     # options.add_argument("--headless")  
     driver = webdriver.Chrome(seleniumwire_options={}, options=options)
-    email = None
+    # Automated login with the credentials you provided
+    email = "maxifb@live.at"
+    password_value = "Maxi1610"  # You'll need to set this
+    token = None
+    print("DEBUG: Looking for email input field...")
     try:
         driver.get(url)
+        # Wait for and fill the email field (using the correct selectors)
+        email_input = WebDriverWait(driver, 30).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "input#Email, input[name='Email'], input.email-input"))
+        )
+        print("DEBUG: Found email input field")
         
+        email_input.clear()
+        email_input.send_keys(email)
+        print(f"DEBUG: Entered email: {email}")
+        
+        # Look for password field
+        print("DEBUG: Looking for password input field...")
+        password_input = WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "input#Password, input[name='Password'], input.password-input"))
+        )
+        print("DEBUG: Found password input field")
+        
+        password_input.clear()
+        password_input.send_keys(password_value)
+        print("DEBUG: Entered password")
+        
+        # Try to find and click the submit button
+        print("DEBUG: Looking for submit button...")
+        submit_btn = None
+        
+        # Try multiple selectors for the submit button
+        submit_selectors = [
+            "button[type='submit']",
+            "input[type='submit']", 
+            ".btn-primary",
+            "button:contains('Log in')",
+            "button:contains('Sign in')",
+            "button:contains('Login')"
+        ]
+        
+        for selector in submit_selectors:
+            try:
+                submit_btn = driver.find_element(By.CSS_SELECTOR, selector)
+                if submit_btn:
+                    break
+            except:
+                continue
+        
+        if submit_btn:
+            submit_btn.click()
+            print("DEBUG: Clicked submit button")
+        else:
+            # Alternative: press Enter on password field
+            password_input.send_keys(Keys.RETURN)
+            print("DEBUG: Pressed Enter on password field")
+            
+        print(f"Retrieving token...")
+    
         WebDriverWait(driver, 120).until(
             EC.presence_of_element_located((By.ID, "ga4-activities-card"))
         )
-                
-        #time.sleep(500)  # Wait for the page to load
-        print(f"Retrieving token...")
-        token = None
         
         # Then search through network requests
         for request in driver.requests:
@@ -205,6 +259,15 @@ def open_in_serum(url, username=None, password=None):
                             break
                     except:
                         continue
+                    
+    except Exception as e:
+        print(f"DEBUG: Could not complete login form: {e}")
+        # Print page source for debugging
+        print("DEBUG: Current page source snippet:")
+        print(driver.page_source[:2000])
+                
+        #time.sleep(500)  # Wait for the page to load
+        
     finally:
         driver.quit()
     if token:
@@ -247,17 +310,20 @@ class TrackManAPI:
         
         # First check if we have a saved token
         saved_tokens = check_saved_tokens()
-        if username in saved_tokens:
-            print(f"Testing saved token validity for user: {username}...")
-            self.auth_token = saved_tokens[username]
-            self.headers["Authorization"] = f"Bearer {self.auth_token}"
-            
-            # Test if the token is still valid
-            if self.test_connection():
-                print("Saved token is valid, authentication successful!")
-                return True
-            else:
-                print("Saved token is no longer valid, proceeding with browser login...")
+        # First check if we have a saved token for this username
+        if username:
+            saved_tokens = check_saved_tokens()
+            if username in saved_tokens:
+                print(f"Testing saved token validity for user: {username}...")
+                self.auth_token = saved_tokens[username]
+                self.headers["Authorization"] = f"Bearer {self.auth_token}"
+                
+                # Test if the token is still valid
+                if self.test_connection():
+                    print("Saved token is valid, authentication successful!")
+                    return True
+                else:
+                    print("Saved token is no longer valid, proceeding with browser login...")
         
         # Continue with regular PKCE authentication flow if no valid token was found
         # Generate PKCE code verifier and challenge
