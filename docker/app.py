@@ -13,6 +13,7 @@ import numpy as np
 from pathlib import Path
 import base64
 import io
+import zipfile
 
 # Import the trackman module for authentication - with comprehensive error handling
 TRACKMAN_AVAILABLE = False
@@ -172,6 +173,9 @@ app.layout = html.Div([
     dcc.Store(id="selected-username-store", data=""),
     dcc.Store(id="filtered-data-store", data=[]),
     dcc.Store(id="home-dir-store", data=str(Path.home())),  # Add this line
+    dcc.Store(id="current-token-store", data=None),
+    
+    dcc.Download(id="download-data"),
     
     # Tabs
     dcc.Tabs(id="main-tabs", value="login", children=[
@@ -212,7 +216,24 @@ app.layout = html.Div([
                         html.Button("Logout Selected", id="logout-btn", style={'margin-right': '10px'}),
                         html.Button("Logout All", id="logout-all-btn"),
                     ], style={'margin-bottom': '20px'}),
-                    
+                    html.Div([
+                        html.Label("Username/Email:", style={'margin-right': '10px'}),
+                        dcc.Input(
+                            id="username-in",
+                            type="text",
+                            placeholder="Enter username or email",
+                            style={'width': '200px', 'margin-right': '10px'}
+                        ),
+                    ], style={'margin-bottom': '10px'}),
+                    html.Div([
+                        html.Label("Password:", style={'margin-right': '10px'}),
+                        dcc.Input(
+                            id="password-in",
+                            type="password",  # <-- This masks the input
+                            placeholder="Enter password",
+                            style={'width': '200px', 'margin-right': '10px'}
+                        ),
+                    ], style={'margin-bottom': '10px'}),
                     html.H4("Save New Token"),
                     html.Div([
                         html.Label("Username/Email:", style={'margin-right': '10px'}),
@@ -277,7 +298,6 @@ app.layout = html.Div([
                 html.Div([
                     html.Button("Download Selected", id="download-selected-btn", style={'margin-right': '10px'}),
                     html.Button("Download All", id="download-all-btn", style={'margin-right': '10px'}),
-                    html.Button("Download Missing", id="download-missing-btn"),
                 ], style={'margin-bottom': '20px'}),
                 
                 html.Div(id="activities-log", style={
@@ -556,6 +576,7 @@ def update_token_dropdown(active_tab, home_dir):
     Output("activities-table", "data", allow_duplicate=True),  # Add this to update activities
     Output("activities-store", "data", allow_duplicate=True),  # Add this to store activities
     Output("activities-log", "children", allow_duplicate=True),  # Add this to show log
+    Output("current-token-store", "data"),
     Input("use-token-btn", "n_clicks"),
     Input("new-login-btn", "n_clicks"),
     Input("logout-btn", "n_clicks"),
@@ -563,10 +584,12 @@ def update_token_dropdown(active_tab, home_dir):
     Input("save-token-btn", "n_clicks"),
     State("token-dropdown", "value"),
     State("username-input", "value"),
+    State("username-in", "value"),
+    State("password-in", "value"), 
     State("home-dir-store", "data"),
     prevent_initial_call=True
 )
-def handle_login_actions(use_token, new_login, logout, logout_all, save_token, selected_user, username_input, home_dir):
+def handle_login_actions(use_token, new_login, logout, logout_all, save_token, selected_user, username_input, username, password,home_dir):
     triggered = ctx.triggered_id
     status = ""
     save_disabled = True
@@ -652,14 +675,14 @@ def handle_login_actions(use_token, new_login, logout, logout_all, save_token, s
             api = trackman.TrackManAPI()
             
             # Start the login process (this will open browser)
-            success = api.login()
+            success = api.login(username,password)
             
             if success and api.auth_token:
                 # Test the token immediately
                 if api.test_connection():
                     status += " - Login successful! Please enter username to save token."
                     save_disabled = False
-                    
+                    current_token = api.auth_token
                     # AUTO-FETCH ACTIVITIES FOR NEW LOGIN TOO
                     try:
                         print(f"DEBUG: Auto-fetching activities after new login")
@@ -714,7 +737,7 @@ def handle_login_actions(use_token, new_login, logout, logout_all, save_token, s
             status += f" - Error: {str(e)}"
             save_disabled = True
             
-        selected_username = ""
+        selected_username = "user"
         
     elif triggered == "logout-btn" and selected_user:
         trackman.invalidate_token(selected_user)
@@ -755,7 +778,7 @@ def handle_login_actions(use_token, new_login, logout, logout_all, save_token, s
         else:
             status = "No active token to save. Please login first."
         
-    return status, save_disabled, selected_username, current_tab, activities_table, activities_store, activities_log
+    return status, save_disabled, selected_username, current_tab, activities_table, activities_store, activities_log, current_token
 
 @app.callback(
     Output("activities-log", "children", allow_duplicate=True),
@@ -764,35 +787,34 @@ def handle_login_actions(use_token, new_login, logout, logout_all, save_token, s
     Input("refresh-activities-btn", "n_clicks"),
     Input("download-selected-btn", "n_clicks"),
     Input("download-all-btn", "n_clicks"),
-    Input("download-missing-btn", "n_clicks"),
     State("selected-username-store", "data"),
     State("ball-type-dropdown", "value"),
     State("activities-table", "selected_rows"),
     State("activities-store", "data"),
     State("activities-table", "data"),  # Add this to preserve existing table data
     State("activities-log", "children"),  # Add this to preserve existing log
+    State("current-token-store", "data"),
     prevent_initial_call=True  # Change this back to True
 )
-def handle_activities_actions(refresh_clicks, download_selected_clicks, download_all_clicks, 
-                            download_missing_clicks, username, ball_type, selected_rows, 
-                            activities, existing_table_data, existing_log):
+def handle_activities_actions(refresh_clicks, download_selected_clicks, download_all_clicks, username, ball_type, selected_rows, 
+                            activities, existing_table_data, existing_log,current_token):
     triggered = ctx.triggered_id
-    
     # If no button was clicked, preserve existing data
     if not triggered:
         return existing_log or "", existing_table_data or [], activities or []
     
-    if not username:
-        return "No user logged in. Please login first.", existing_table_data or [], activities or []
-    
-    # Initialize API with stored credentials
-    api = trackman.TrackManAPI()
-    tokens = trackman.check_saved_tokens()
-    token = tokens.get(username)
-    
-    if not token:
-        return "No valid token found. Please login again.", existing_table_data or [], activities or []
-    
+    if not current_token:
+        if not username:
+            return "No user logged in. Please login first.", existing_table_data or [], activities or []
+        api = trackman.TrackManAPI()
+        tokens = trackman.check_saved_tokens()
+        token = tokens.get(username)
+        if not token:
+            return "No valid token found. Please login again.", existing_table_data or [], activities or []
+    else:
+        api = trackman.TrackManAPI()
+        token = current_token
+
     api.auth_token = token
     api.headers["Authorization"] = f"Bearer {token}"
     
@@ -834,7 +856,7 @@ def handle_activities_actions(refresh_clicks, download_selected_clicks, download
         except Exception as e:
             return f"Error fetching activities: {str(e)}", existing_table_data or [], activities or []
     
-    elif triggered in ["download-selected-btn", "download-all-btn", "download-missing-btn"]:
+    elif triggered in ["download-selected-btn", "download-all-btn"]:
         if not activities:
             return "No activities available. Please refresh activities first.", existing_table_data or [], activities or []
         
@@ -861,7 +883,7 @@ def handle_activities_actions(refresh_clicks, download_selected_clicks, download
                                 shot["session_number"] = selected_idx + 1
                                 shot["session_time"] = selected_activity.get("time")
                                 shot["session_kind"] = selected_activity.get("kind")
-                            api.save_shots_to_csv(shot_data, ball_type=bt, username=username)
+                            save_shots_to_csv(shot_data, ball_type=bt, username=username)
                             log_message += f"Downloaded {len(shot_data.get('shots', []))} {bt} shots\n"
                 else:
                     shot_data = api.get_range_practice_shots(selected_activity.get('id'), ball_type)
@@ -871,7 +893,7 @@ def handle_activities_actions(refresh_clicks, download_selected_clicks, download
                             shot["session_number"] = selected_idx + 1
                             shot["session_time"] = selected_activity.get("time")
                             shot["session_kind"] = selected_activity.get("kind")
-                        api.save_shots_to_csv(shot_data, ball_type=ball_type, username=username)
+                        save_shots_to_csv(shot_data, ball_type=ball_type, username=username)
                         log_message += f"Downloaded {len(shot_data.get('shots', []))} {ball_type} shots\n"
                 
                 # IMPORTANT: Preserve existing table and activities data
@@ -889,7 +911,7 @@ def handle_activities_actions(refresh_clicks, download_selected_clicks, download
                                     shot["session_number"] = idx + 1
                                     shot["session_time"] = activity.get("time")
                                     shot["session_kind"] = activity.get("kind")
-                                api.save_shots_to_csv(shot_data, ball_type=bt, username=username)
+                                save_shots_to_csv(shot_data, ball_type=bt, username=username)
                                 log_message += f"Session {idx+1}: Downloaded {len(shot_data.get('shots', []))} {bt} shots\n"
                     else:
                         shot_data = api.get_range_practice_shots(activity.get('id'), ball_type)
@@ -898,62 +920,8 @@ def handle_activities_actions(refresh_clicks, download_selected_clicks, download
                                 shot["session_number"] = idx + 1
                                 shot["session_time"] = activity.get("time")
                                 shot["session_kind"] = activity.get("kind")
-                            api.save_shots_to_csv(shot_data, ball_type=ball_type, username=username)
+                            save_shots_to_csv(shot_data, ball_type=ball_type, username=username)
                             log_message += f"Session {idx+1}: Downloaded {len(shot_data.get('shots', []))} shots\n"
-                
-                # IMPORTANT: Preserve existing table and activities data
-                return log_message, existing_table_data, activities
-                
-            elif triggered == "download-missing-btn":
-                # Check for missing sessions
-                existing_pro_sessions, existing_range_sessions = trackman.get_existing_sessions(username)
-                missing_activities = []
-                
-                for idx, activity in enumerate(activities):
-                    # Convert activity time to date string
-                    activity_time = activity.get("time", "")
-                    activity_date = ""
-                    
-                    if activity_time:
-                        try:
-                            dt = datetime.fromisoformat(activity_time.replace('Z', '+00:00'))
-                            activity_date = dt.strftime("%Y%m%d")
-                        except:
-                            continue
-                    
-                    session_num = str(idx + 1)
-                    
-                    # Check which sessions are missing
-                    pro_missing = (activity_date, session_num) not in existing_pro_sessions
-                    range_missing = (activity_date, session_num) not in existing_range_sessions
-                    
-                    if ball_type == "PREMIUM" and pro_missing:
-                        missing_activities.append((idx, activity, ["PREMIUM"]))
-                    elif ball_type == "RANGE" and range_missing:
-                        missing_activities.append((idx, activity, ["RANGE"]))
-                    elif ball_type == "BOTH" and (pro_missing or range_missing):
-                        missing_balls = []
-                        if pro_missing:
-                            missing_balls.append("PREMIUM")
-                        if range_missing:
-                            missing_balls.append("RANGE")
-                        missing_activities.append((idx, activity, missing_balls))
-                
-                if not missing_activities:
-                    return "All sessions are already saved. No missing sessions found.", existing_table_data, activities
-                
-                log_message = f"Found {len(missing_activities)} missing sessions. Downloading...\n"
-                
-                for idx, activity, missing_ball_types in missing_activities:
-                    for bt in missing_ball_types:
-                        shot_data = api.get_range_practice_shots(activity.get('id'), bt)
-                        if shot_data and shot_data.get("shots"):
-                            for shot in shot_data.get("shots", []):
-                                shot["session_number"] = idx + 1
-                                shot["session_time"] = activity.get("time")
-                                shot["session_kind"] = activity.get("kind")
-                            api.save_shots_to_csv(shot_data, ball_type=bt, username=username)
-                            log_message += f"Session {idx+1}: Downloaded {len(shot_data.get('shots', []))} {bt} shots\n"
                 
                 # IMPORTANT: Preserve existing table and activities data
                 return log_message, existing_table_data, activities
@@ -1427,6 +1395,125 @@ def toggle_delete_shot(active_cell, table_data, derived_virtual_data, filtered_d
     
     return updated_table_data, updated_filtered_data, style_data_conditional, updated_fig
 
+def save_shots_to_csv(shots_data, filename=None, ball_type="PREMIUM", username=None):
+        """Save shot data to a CSV file"""
+        if not shots_data or not shots_data.get("shots"):
+            print("No shot data to save")
+            return
+        
+        print(f"DEBUG: Saving shots data to CSV with ball type: {ball_type}, username: {username}, filename: {filename}, shots count: {len(shots_data.get('shots', []))}")
+        
+        # Create base Data directory
+        data_dir = "Data"
+        os.makedirs(data_dir, exist_ok=True)
+        
+        # Include username in path if provided
+        if username:
+            data_dir = os.path.join(data_dir, username)
+            os.makedirs(data_dir, exist_ok=True)
+        
+        # Create ball type-specific subdirectory
+        ball_type_lower = ball_type.lower()
+        ball_dir = os.path.join(data_dir, ball_type_lower)
+        os.makedirs(ball_dir, exist_ok=True)
+        
+        # Rest of the method remains the same
+        shots = shots_data.get("shots", [])
+        
+        # Get session date and number for filename
+        session_time = ""
+        if shots and "session_time" in shots[0]:
+            try:
+                dt = datetime.fromisoformat(shots[0]["session_time"].replace('Z', '+00:00'))
+                session_time = dt.strftime("%Y%m%d")
+            except:
+                pass
+        
+        session_num = shots[0].get("session_number", "1") if shots else "1"
+        
+        # Create filename with directory, date, session number and ball type
+        ball_suffix = "_range" if ball_type == "RANGE" else "_pro"
+        
+        if not session_time:
+            filename = f"{ball_dir}/trackman_session{session_num}{ball_suffix}.csv"
+        else:
+            filename = f"{ball_dir}/trackman_{session_time}_session{session_num}{ball_suffix}.csv"
+
+        # Define measurement fields to include
+        measurement_fields = [
+            "ballSpeed",
+            "ballSpin", 
+            "carry",
+            "carryActual",
+            "carrySide",
+            "carrySideActual",
+            "curve",
+            "curveActual",
+            "curveTotal",
+            "curveTotalActual",
+            "launchAngle",
+            "launchDirection",
+            "maxHeight",
+            "spinAxis",
+            "total",
+            "totalActual",
+            "totalSide",
+            "totalSideActual",
+            "ballSpinEffective",
+            "targetDistance",
+            "distanceFromPin",
+            "distanceFromPinActual",
+            "distanceFromPinTotal",
+            "distanceFromPinTotalActual",
+            "landingAngle",
+            "reducedAccuracy",
+        ]
+
+        # Create header
+        header = ["Shot Number", "Club", "Bay"] + measurement_fields
+        
+        # Prepare rows
+        rows = [",".join(header)]
+        
+        # Sort shots by time
+        shots.sort(key=lambda x: x.get("time", ""))
+        
+        # Process each shot
+        for idx, shot in enumerate(shots, 1):
+            data = shot.get("measurement", {})
+            club = shot.get("club", "")
+            if club is None:
+                club = "Unknown"
+            
+            # Initialize the row with basic shot info
+            row = [
+                str(idx),
+                str(club),
+                str(shot.get("bayName", ""))
+            ]
+            
+            # Add measurement fields
+            for field in measurement_fields:
+                value = data.get(field, "")
+                if isinstance(value, bool):
+                    value = str(value)
+                elif value is None:
+                    value = ""
+                else:
+                    value = str(value)
+                row.append(value)
+            
+            try:
+                rows.append(",".join(row))
+            except Exception as e:
+                print(f"Error processing row: {row} with error: {e}")
+                continue
+        
+        # Join all rows into a CSV string
+        csv_content = "\n".join(rows)
+        
+        # Write to file
+        return csv_content, filename
 @app.callback(
     Output("analysis-plot", "figure", allow_duplicate=True),
     Output("selected-shots-table", "data", allow_duplicate=True),
@@ -3221,6 +3308,103 @@ def handle_home_directory_actions(set_clicks, reset_clicks, input_path, current_
             status = "❌ Failed to reset to default home directory"
     
     return status, new_path, current_home_dir or str(Path.home())
+
+@app.callback(
+    Output("download-data", "data", allow_duplicate=True),
+    Input("download-selected-btn", "n_clicks"),
+    State("selected-username-store", "data"),
+    State("ball-type-dropdown", "value"),
+    State("activities-table", "selected_rows"),
+    State("activities-store", "data"),
+    State("current-token-store", "data"),
+    prevent_initial_call=True
+)
+def download_selected_activity(n_clicks, username, ball_type, selected_rows, activities, current_token):
+    if not n_clicks or not selected_rows or not activities:
+        raise dash.exceptions.PreventUpdate
+
+    selected_idx = selected_rows[0]
+    selected_activity = activities[selected_idx]
+
+    api = trackman.TrackManAPI()
+    api.auth_token = current_token
+    api.headers["Authorization"] = f"Bearer {current_token}"
+
+    if ball_type == "BOTH":
+        # Create a zip file for both ball types
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+            for bt in ["RANGE", "PREMIUM"]:
+                shot_data = api.get_range_practice_shots(selected_activity.get('id'), bt)
+                if not shot_data or not shot_data.get("shots"):
+                    continue
+                # Add session metadata
+                for shot in shot_data.get("shots", []):
+                    shot["session_number"] = selected_idx + 1
+                    shot["session_time"] = selected_activity.get("time")
+                    shot["session_kind"] = selected_activity.get("kind")
+                csv_content, filename = save_shots_to_csv(shot_data, ball_type=bt, username=username)
+                # Only the filename part for the zip (not full path)
+                zip_file.writestr(os.path.basename(filename), csv_content)
+    
+    # Download the shot data
+    shot_data = api.get_range_practice_shots(selected_activity.get('id'), ball_type)
+    if not shot_data or not shot_data.get("shots"):
+        raise dash.exceptions.PreventUpdate
+    
+    csv_content,filename = save_shots_to_csv(shot_data, ball_type=ball_type, username=username)
+
+    # Return as CSV download
+    return dcc.send_bytes(csv_content.encode("utf-8"), filename)
+
+@app.callback(
+    Output("download-data", "data"),
+    Input("download-all-btn", "n_clicks"),
+    State("selected-username-store", "data"),
+    State("ball-type-dropdown", "value"),
+    State("activities-store", "data"),
+    State("current-token-store", "data"),
+    prevent_initial_call=True
+)
+def download_all_activities(n_clicks, username, ball_type, activities, current_token):
+    if not n_clicks or not activities:
+        raise dash.exceptions.PreventUpdate
+
+    api = trackman.TrackManAPI()
+    api.auth_token = current_token
+    api.headers["Authorization"] = f"Bearer {current_token}"
+
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+        for idx, activity in enumerate(activities):
+            if ball_type == "BOTH":
+                for bt in ["RANGE", "PREMIUM"]:
+                    shot_data = api.get_range_practice_shots(activity.get('id'), bt)
+                    if not shot_data or not shot_data.get("shots"):
+                        continue
+                    # Add session metadata
+                    for shot in shot_data.get("shots", []):
+                        shot["session_number"] = idx + 1
+                        shot["session_time"] = activity.get("time")
+                        shot["session_kind"] = activity.get("kind")
+                    csv_content, filename = save_shots_to_csv(shot_data, ball_type=bt, username=username)
+                    # Only the filename part for the zip (not full path)
+                    zip_file.writestr(os.path.basename(filename), csv_content)
+            else:
+                shot_data = api.get_range_practice_shots(activity.get('id'), ball_type)
+                if not shot_data or not shot_data.get("shots"):
+                    continue
+                # Add session metadata
+                for shot in shot_data.get("shots", []):
+                    shot["session_number"] = idx + 1
+                    shot["session_time"] = activity.get("time")
+                    shot["session_kind"] = activity.get("kind")
+                csv_content, filename = save_shots_to_csv(shot_data, ball_type=ball_type, username=username)
+                # Only the filename part for the zip (not full path)
+                zip_file.writestr(os.path.basename(filename), csv_content)
+
+    zip_buffer.seek(0)
+    return dcc.send_bytes(zip_buffer.getvalue(), "trackman_sessions.zip")
 
 # Add a function to save plots to the home directory
 def save_plot_to_home(fig, filename, home_dir=None):

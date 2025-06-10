@@ -156,10 +156,11 @@ def open_in_serum(url, username=None, password=None):
     Args:
         url (str): The URL to open.
     """
+    print(f"email: {username}, password: {password}")
     # Serum is a custom browser, replace with actual command to open it
     # This is a placeholder for demonstration purposes
     options = Options()
-    options.add_argument("--headless=new")
+    #options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
@@ -172,8 +173,8 @@ def open_in_serum(url, username=None, password=None):
     # options.add_argument("--headless")  
     driver = webdriver.Chrome(seleniumwire_options={}, options=options)
     # Automated login with the credentials you provided
-    email = "maxifb@live.at"
-    password_value = "Maxi1610"  # You'll need to set this
+    email = username
+    password_value = password  # You'll need to set this
     token = None
     print("DEBUG: Looking for email input field...")
     try:
@@ -367,6 +368,7 @@ class TrackManAPI:
         save_token(self.auth_token, username)
         
         print("Authentication successful!\n")
+        
         return True
     
     def get_access_token(self, client_id, username, password):
@@ -680,6 +682,8 @@ class TrackManAPI:
         if not shots_data or not shots_data.get("shots"):
             print("No shot data to save")
             return
+        
+        print(f"DEBUG: Saving shots data to CSV with ball type: {ball_type}, username: {username}, filename: {filename}, shots count: {len(shots_data.get('shots', []))}")
         
         # Create base Data directory
         data_dir = "Data"
