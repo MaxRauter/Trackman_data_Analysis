@@ -3346,16 +3346,19 @@ def download_selected_activity(n_clicks, username, ball_type, selected_rows, act
                 csv_content, filename = save_shots_to_csv(shot_data, ball_type=bt, username=username)
                 # Only the filename part for the zip (not full path)
                 zip_file.writestr(os.path.basename(filename), csv_content)
-    
-    # Download the shot data
-    shot_data = api.get_range_practice_shots(selected_activity.get('id'), ball_type)
-    if not shot_data or not shot_data.get("shots"):
-        raise dash.exceptions.PreventUpdate
-    
-    csv_content,filename = save_shots_to_csv(shot_data, ball_type=ball_type, username=username)
+                
+        zip_buffer.seek(0)
+        return dcc.send_bytes(zip_buffer.getvalue(), "trackman_sessions.zip")
+    else:
+        # Download the shot data
+        shot_data = api.get_range_practice_shots(selected_activity.get('id'), ball_type)
+        if not shot_data or not shot_data.get("shots"):
+            raise dash.exceptions.PreventUpdate
+        
+        csv_content,filename = save_shots_to_csv(shot_data, ball_type=ball_type, username=username)
 
-    # Return as CSV download
-    return dcc.send_bytes(csv_content.encode("utf-8"), filename)
+        # Return as CSV download
+        return dcc.send_bytes(csv_content.encode("utf-8"), filename)
 
 @app.callback(
     Output("download-data", "data"),

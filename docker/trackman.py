@@ -160,7 +160,7 @@ def open_in_serum(url, username=None, password=None):
     # Serum is a custom browser, replace with actual command to open it
     # This is a placeholder for demonstration purposes
     options = Options()
-    #options.add_argument("--headless=new")
+    options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
