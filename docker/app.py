@@ -15,7 +15,7 @@ import base64
 import io
 import zipfile
 
-# Import the trackman module for authentication - with comprehensive error handling
+# Import the trackman module for authentication - with error handling
 TRACKMAN_AVAILABLE = False
 try:
     spec = importlib.util.spec_from_file_location("trackman", "trackman.py")
